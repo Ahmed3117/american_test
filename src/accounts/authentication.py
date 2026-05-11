@@ -1,0 +1,124 @@
+"""
+Custom JWT Authentication for multi-device login enforcement.
+Students can only be logged in from a limited number of devices (default 2).
+Admins can adjust the limit per student and remove devices.
+"""
+
+from rest_framework_simplejwt.authentication import JWTAuthentication
+from rest_framework.exceptions import AuthenticationFailed
+from django.conf import settings
+from django.core.cache import cache
+from django.utils import timezone
+
+
+DEFAULT_DEVICE_LAST_USED_UPDATE_INTERVAL_SECONDS = 300
+
+
+def _device_last_used_update_interval_seconds():
+    try:
+        return max(
+            0,
+            int(
+                getattr(
+                    settings,
+                    'DEVICE_LAST_USED_UPDATE_INTERVAL_SECONDS',
+                    DEFAULT_DEVICE_LAST_USED_UPDATE_INTERVAL_SECONDS,
+                )
+            ),
+        )
+    except (TypeError, ValueError):
+        return DEFAULT_DEVICE_LAST_USED_UPDATE_INTERVAL_SECONDS
+
+
+def _maybe_update_device_last_used(device):
+    interval_seconds = _device_last_used_update_interval_seconds()
+    now = timezone.now()
+
+    if (
+        interval_seconds > 0
+        and device.last_used_at
+        and (now - device.last_used_at).total_seconds() < interval_seconds
+    ):
+        return False
+
+    cache_key = f'auth:device-last-used:{device.pk}'
+    if interval_seconds > 0 and not cache.add(cache_key, True, timeout=interval_seconds):
+        return False
+
+    from accounts.models import UserDevice
+
+    try:
+        UserDevice.objects.filter(pk=device.pk).update(last_used_at=now)
+    except Exception:
+        cache.delete(cache_key)
+        raise
+
+    device.last_used_at = now
+    return True
+
+
+class MultiDeviceJWTAuthentication(JWTAuthentication):
+    """
+    Custom JWT Authentication that enforces multi-device login limits for students.
+    
+    When a student logs in, a unique device_token is generated and stored in UserDevice.
+    On each request, this authentication class validates that the device_token
+    in the JWT exists in the user's active devices.
+    
+    If the device limit is reached and a new login occurs, the oldest device is removed.
+    Admins can also manually remove devices or adjust the max_allowed_devices per student.
+    
+    This restriction only applies to users with user_type='student'.
+    Dashboard staff can use normal JWT authentication without device limits.
+    """
+    
+    def authenticate(self, request):
+        # First, perform standard JWT authentication
+        result = super().authenticate(request)
+        
+        if result is None:
+            return None
+        
+        user, validated_token = result
+        
+        # Check if user is banned
+        if user.is_banned:
+            raise AuthenticationFailed(
+                detail='لقد تم حظر هذا الحساب',
+                code='user_banned'
+            )
+        
+        # Only enforce device limits for students
+        if user.user_type == 'student':
+            # Get the device token from the JWT
+            token_device_id = validated_token.get('device_token')
+            
+            # If there's no device_token in the JWT, it's an old token - still allow for backward compatibility
+            # You can change this to reject old tokens after migration period
+            if token_device_id is not None:
+                # Import here to avoid circular imports
+                from accounts.models import UserDevice
+                
+                # Check if this device_token exists and is active for this user
+                device = UserDevice.objects.only('id', 'is_banned', 'last_used_at').filter(
+                    user_id=user.id,
+                    device_token=token_device_id,
+                    is_active=True
+                ).first()
+                
+                if not device:
+                    raise AuthenticationFailed(
+                        detail='انتهت الجلسة. تم تسجيل الخروج من هذا الجهاز أو تمت إزالته.',
+                        code='device_token_invalid'
+                    )
+                
+                # Check if device is banned
+                if device.is_banned:
+                    raise AuthenticationFailed(
+                        detail='لقد تم حظر هذا الجهاز',
+                        code='device_banned'  
+                    )
+                
+                _maybe_update_device_last_used(device)
+        
+        return (user, validated_token)
