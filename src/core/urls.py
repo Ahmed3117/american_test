@@ -20,8 +20,10 @@ from django.conf import settings
 from django.conf.urls.static import static
 
 from subscription.webhooks import easypay_webhook
+from core.admin_dummy_data import import_dummy_data_view
 
 urlpatterns = [
+    path('admin/import-dummy-data/', import_dummy_data_view, name='import_dummy_data'),
     path('admin/', admin.site.urls),
     path('accounts/', include('accounts.urls')),
     path('courses/', include('course.urls')),

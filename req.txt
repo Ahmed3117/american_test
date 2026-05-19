@@ -1,0 +1,13 @@
+Django
+djangorestframework
+djangorestframework-simplejwt
+djangorestframework-api-key
+django-filter
+django-cors-headers
+django-admin-interface
+django-colorfield
+django-storages
+python-dotenv
+requests
+Pillow
+boto3

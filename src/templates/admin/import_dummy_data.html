@@ -1,0 +1,89 @@
+{% extends "admin/base.html" %}
+{% load static %}
+
+{% block extrastyle %}
+{{ block.super }}
+<style>
+    .import-form {
+        max-width: 600px;
+        margin: 20px;
+    }
+    .import-form .form-row {
+        margin-bottom: 15px;
+    }
+    .import-form input[type="file"] {
+        padding: 10px;
+        border: 1px solid #ccc;
+        border-radius: 4px;
+        width: 100%;
+    }
+    .info-box {
+        background: #e7f3ff;
+        border: 1px solid #b8daff;
+        border-radius: 4px;
+        padding: 15px;
+        margin-bottom: 20px;
+    }
+    .info-box h3 {
+        margin-top: 0;
+        color: #1a4e89;
+    }
+    .info-box ul {
+        margin-bottom: 0;
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="import-form">
+    <h1>Import Dummy Data</h1>
+
+    <div class="info-box">
+        <h3>📋 Data Format</h3>
+        <p>This tool imports dummy data from a JSON file containing:</p>
+        <ul>
+            <li><strong>Admin:</strong> Username, password, email, name</li>
+            <li><strong>Students:</strong> Username, password, name, parent_phone, government</li>
+            <li><strong>Courses:</strong> Name, description, units</li>
+            <li><strong>Questions:</strong> Text, points, difficulty, type, answers (for MCQ)</li>
+            <li><strong>Exams:</strong> Title, type, time_limit, questions</li>
+            <li><strong>Plans:</strong> Title, price, validity period</li>
+            <li><strong>Subscriptions:</strong> Student, plan, courses</li>
+        </ul>
+        <p><strong>Default JSON file:</strong> <code>dummy_data.json</code> in project root</p>
+    </div>
+
+    <form method="post" enctype="multipart/form-data">
+        {% csrf_token %}
+
+        <div class="form-row">
+            <label for="id_json_file">JSON File:</label>
+            <input type="file" name="json_file" id="id_json_file" accept=".json">
+        </div>
+
+        <div class="form-row">
+            <label for="id_clear_existing">
+                <input type="checkbox" name="clear_existing" id="id_clear_existing">
+                Clear existing dummy data first
+            </label>
+            <p class="help">Warning: This will delete all existing students, courses, exams, questions, plans, and subscriptions.</p>
+        </div>
+
+        <div class="submit-row">
+            <input type="submit" value="Import Data" class="default">
+        </div>
+    </form>
+
+    <h2 style="margin-top: 30px;">Or use Command Line</h2>
+    <pre style="background: #f5f5f5; padding: 15px; border-radius: 4px;">
+# Import from default file (dummy_data.json)
+python manage.py import_dummy_data
+
+# Import from specific file
+python manage.py import_dummy_data --json-file=/path/to/data.json
+
+# Clear existing data before import
+python manage.py import_dummy_data --clear
+    </pre>
+</div>
+{% endblock %}
