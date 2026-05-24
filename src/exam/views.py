@@ -98,10 +98,7 @@ class StartExam(APIView):
     def _get_random_exam_questions(self, exam, result):
         exam_models = ExamModel.objects.filter(exam=exam, is_active=True)
         if not exam_models.exists():
-            return Response(
-                {"error": "No models available for this random exam"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            return None, None
 
         exam_model = exam_models.order_by('?').first()
         result.exam_model = exam_model
@@ -158,6 +155,11 @@ class StartExam(APIView):
             # Use the existing unsubmitted trial
             result_trial = unsubmitted_trial
             questions, exam_model = self._get_exam_questions(exam, result)
+            if questions is None:
+                return Response(
+                    {"error": "No models available for this random exam"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             if exam_model and not result_trial.exam_model:
                 result_trial.exam_model = exam_model
                 result_trial.save()
@@ -182,6 +184,15 @@ class StartExam(APIView):
                 status=status.HTTP_200_OK
             )
         else:
+            # Fetch questions before consuming a trial so misconfigured random
+            # exams do not create an unusable attempt.
+            questions, exam_model = self._get_exam_questions(exam, result)
+            if questions is None:
+                return Response(
+                    {"error": "No models available for this random exam"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
             # Increment trial counter
             result.trial += 1
             result.save()
@@ -193,8 +204,6 @@ class StartExam(APIView):
                 student_started_exam_at=timezone.now()
             )
 
-            # Fetch questions based on exam type
-            questions, exam_model = self._get_exam_questions(exam, result)
             if exam_model:
                 result_trial.exam_model = exam_model
                 result_trial.save()
