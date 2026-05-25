@@ -125,6 +125,9 @@ class SubscribePlanSerializer(serializers.Serializer):
     )
 
     def validate_course_ids(self, value):
+        if len(value) != len(set(value)):
+            raise serializers.ValidationError("لا يمكن اختيار نفس المادة أكثر من مرة")
+
         unique_ids = list(dict.fromkeys(value))
         plan = self.context["plan"]
         if len(unique_ids) > plan.number_of_allowed_courses_to_subscribe:
