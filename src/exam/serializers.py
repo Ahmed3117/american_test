@@ -105,7 +105,7 @@ class QuestionSerializerWithoutCorrectAnswer(serializers.ModelSerializer):
 
     class Meta:
         model = Question
-        fields = ['id', 'text','explanation', 'image', 'points', 'difficulty', 'category', 'course', 'unit', 'is_active', 'answers', 'question_type']
+        fields = ['id', 'text', 'explanation_text', 'explanation_video_url', 'explanation_recorded_audio', 'image', 'points', 'difficulty', 'category', 'course', 'unit', 'is_active', 'answers', 'question_type']
 
 class AnswerSerializerWithCorrectAnswer(serializers.ModelSerializer):
     class Meta:
@@ -117,7 +117,7 @@ class QuestionSerializerWithCorrectAnswer(serializers.ModelSerializer):
 
     class Meta:
         model = Question
-        fields = ['id', 'text','explanation', 'image', 'points', 'difficulty', 'category', 'course', 'unit', 'is_active', 'answers', 'question_type']
+        fields = ['id', 'text', 'explanation_text', 'explanation_video_url', 'explanation_recorded_audio', 'image', 'points', 'difficulty', 'category', 'course', 'unit', 'is_active', 'answers', 'question_type']
 
 
 class StudentExamResultSerializer(serializers.ModelSerializer):
@@ -336,11 +336,17 @@ class AdminQuestionBankSerializer(serializers.ModelSerializer):
     question_text = serializers.CharField(source='question.text', read_only=True)
     question_type = serializers.CharField(source='question.question_type', read_only=True)
     question_points = serializers.IntegerField(source='question.points', read_only=True)
-    question_explanation = serializers.CharField(source='question.explanation', read_only=True, allow_null=True)
-    
+    question_explanation_text = serializers.CharField(source='question.explanation_text', read_only=True, allow_null=True)
+    question_explanation_video_url = serializers.URLField(source='question.explanation_video_url', read_only=True, allow_null=True)
+    question_explanation_recorded_audio = serializers.FileField(source='question.explanation_recorded_audio', read_only=True, allow_null=True)
+
     class Meta:
         model = AdminQuestionBank
-        fields = ['id', 'question', 'question_details', 'question_text', 'question_type', 'question_points','question_explanation', 'created']
+        fields = [
+            'id', 'question', 'question_details', 'question_text', 'question_type', 'question_points',
+            'question_explanation_text', 'question_explanation_video_url', 'question_explanation_recorded_audio',
+            'created'
+        ]
 
 
 class StudentCreatedExamSerializer(serializers.ModelSerializer):

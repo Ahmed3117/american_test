@@ -42,7 +42,9 @@ class QuestionSerializer(serializers.ModelSerializer):
         fields = [
             "id",
             "text",
-            "explanation",
+            "explanation_text",
+            "explanation_video_url",
+            "explanation_recorded_audio",
             "image",
             "points",
             "difficulty",
@@ -229,7 +231,9 @@ class EssaySubmissionSerializer(serializers.ModelSerializer):
         data["student"] = instance.student.name
         data["exam"] = instance.exam.title
         data["question"] = instance.question.text
-        data["question_explanation"] = instance.question.explanation
+        data["question_explanation_text"] = instance.question.explanation_text
+        data["question_explanation_video_url"] = instance.question.explanation_video_url
+        data["question_explanation_recorded_audio"] = instance.question.explanation_recorded_audio.url if instance.question.explanation_recorded_audio else None
         data["question_comment"] = instance.question.comment
         data["question_image"] = instance.question.image.url if instance.question.image else None
         return data

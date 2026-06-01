@@ -33,6 +33,21 @@ from course.models import Course, Unit
 from subscription.models import CourseSubscription
 from subscription.access import student_has_course_access
 
+
+def _question_explanation_fields(question, prefix="question_explanation"):
+    if not question:
+        return {
+            f"{prefix}_text": None,
+            f"{prefix}_video_url": None,
+            f"{prefix}_recorded_audio": None,
+        }
+    return {
+        f"{prefix}_text": question.explanation_text,
+        f"{prefix}_video_url": question.explanation_video_url,
+        f"{prefix}_recorded_audio": question.explanation_recorded_audio.url if question.explanation_recorded_audio else None,
+    }
+
+
 class CheckExamStartAbility(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -567,7 +582,7 @@ class GetMyExamResult(APIView):
                 "question_text": question.text if question else None,
                 "question_image": question.image.url if question and question.image else None,
                 "question_comment": question.comment,
-                "question_explanation": question.explanation if question else None,
+                **_question_explanation_fields(question),
                 "selected_answer": selected_answer_obj,  # Updated to include full object
                 "is_correct": submission.is_correct if submission.is_correct is not None else False,
                 "is_solved": submission.is_solved if submission.is_solved is not None else False,
@@ -591,7 +606,7 @@ class GetMyExamResult(APIView):
                 "question_text": question.text if question else None,
                 "question_image": question.image.url if question and question.image else None,
                 "question_comment": question.comment,
-                "question_explanation": question.explanation if question else None,
+                **_question_explanation_fields(question),
                 "answer_text": submission.answer_text,
                 "answer_file": submission.answer_file.url if submission.answer_file else None,
                 "score": submission.score,
@@ -609,7 +624,7 @@ class GetMyExamResult(APIView):
                 "question_image": question.image.url if question.image else None,
                 "question_type": question.question_type,
                 "question_comment": question.comment,
-                "question_explanation": question.explanation if question else None,
+                **_question_explanation_fields(question),
                 "correct_answers": [
                     {"text": answer.text, "image": answer.image.url if answer.image else None}
                     for answer in question.answers.filter(is_correct=True)
@@ -733,7 +748,7 @@ class GetMyExamResultForTrial(APIView):
                 "question_text": question.text if question else None,
                 "question_image": question.image.url if question and question.image else None,
                 "question_comment": question.comment,
-                "question_explanation": question.explanation if question else None,
+                **_question_explanation_fields(question),
                 "selected_answer": selected_answer_obj,
                 "is_correct": submission.is_correct if submission.is_correct is not None else False,
                 "is_solved": submission.is_solved if submission.is_solved is not None else False,
@@ -754,7 +769,7 @@ class GetMyExamResultForTrial(APIView):
                 "question_text": question.text if question else None,
                 "question_image": question.image.url if question and question.image else None,
                 "question_comment": question.comment,
-                "question_explanation": question.explanation if question else None,
+                **_question_explanation_fields(question),
                 "answer_text": submission.answer_text,
                 "answer_file": submission.answer_file.url if submission.answer_file else None,
                 "score": submission.score,
@@ -772,7 +787,7 @@ class GetMyExamResultForTrial(APIView):
                 "question_image": question.image.url if question.image else None,
                 "question_type": question.question_type,
                 "question_comment": question.comment,
-                "question_explanation": question.explanation if question else None,
+                **_question_explanation_fields(question),
                 "correct_answers": [
                     {"text": answer.text, "image": answer.image.url if answer.image else None}
                     for answer in question.answers.filter(is_correct=True)
@@ -840,7 +855,8 @@ class StudentBankListView(generics.ListAPIView):
             # StudentBank fields
             'id', 'add_reason', 'is_solved_now', 'created',
             # Question fields (minimal needed for serialization)
-            'question__id', 'question__text', 'question__explanation', 'question__points', 
+            'question__id', 'question__text', 'question__explanation_text',
+            'question__explanation_video_url', 'question__explanation_recorded_audio', 'question__points',
             'question__question_type', 'question__image',
             # Related fields for filtering
             'question__course__id', 'question__course__name',
@@ -916,7 +932,7 @@ class CreateTempExam(APIView):
                     queryset=Question.objects.filter(
                         is_active=True, 
                         question_type=QuestionType.MCQ
-                    ).only('id', 'text', 'explanation', 'points', 'image', 'comment', 'difficulty')
+                    ).only('id', 'text', 'explanation_text', 'explanation_video_url', 'explanation_recorded_audio', 'points', 'image', 'comment', 'difficulty')
                 )
             )
             .only('id', 'student_id', 'question_id', 'is_solved_now')
@@ -950,7 +966,7 @@ class CreateTempExam(APIView):
                     similars = list(original_question.similar_questions.filter(
                         is_active=True, 
                         question_type=QuestionType.MCQ
-                    ).only('id', 'text', 'explanation', 'points', 'image', 'comment', 'difficulty')[:10])  # Limit to first 10
+                    ).only('id', 'text', 'explanation_text', 'explanation_video_url', 'explanation_recorded_audio', 'points', 'image', 'comment', 'difficulty')[:10])  # Limit to first 10
                     similar_questions_cache[original_id] = similars
                 except Exception:
                     similar_questions_cache[original_id] = []

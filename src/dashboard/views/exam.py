@@ -67,6 +67,20 @@ def _bool(value):
     return str(value).lower() in {"true", "1", "yes"}
 
 
+def _question_explanation_fields(question, prefix="question_explanation"):
+    if not question:
+        return {
+            f"{prefix}_text": None,
+            f"{prefix}_video_url": None,
+            f"{prefix}_recorded_audio": None,
+        }
+    return {
+        f"{prefix}_text": question.explanation_text,
+        f"{prefix}_video_url": question.explanation_video_url,
+        f"{prefix}_recorded_audio": question.explanation_recorded_audio.url if question.explanation_recorded_audio else None,
+    }
+
+
 def _exam_course_filter(course_id):
     return Q(course_id=course_id)
 
@@ -139,7 +153,7 @@ def _serialize_trial_answer(submission):
         "question_text": question.text,
         "question_image": question.image.url if question.image else None,
         "question_comment": question.comment,
-        "question_explanation": question.explanation,
+        **_question_explanation_fields(question),
         "selected_answer": selected_answer,
         "is_correct": submission.is_correct,
         "is_solved": submission.is_solved,
@@ -159,7 +173,7 @@ def _serialize_essay_submission(submission):
         "question_text": question.text,
         "question_image": question.image.url if question.image else None,
         "question_comment": question.comment,
-        "question_explanation": question.explanation,
+        **_question_explanation_fields(question),
         "answer_text": submission.answer_text,
         "answer_file": submission.answer_file.url if submission.answer_file else None,
         "score": submission.score,
@@ -294,6 +308,8 @@ class QuestionListCreateView(generics.ListCreateAPIView):
         data = _strip_parser_artifacts(request.data)
         if "image" in request.FILES:
             data["image"] = request.FILES["image"]
+        if "explanation_recorded_audio" in request.FILES:
+            data["explanation_recorded_audio"] = request.FILES["explanation_recorded_audio"]
         serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
         question = serializer.save()
@@ -359,11 +375,18 @@ class BulkQuestionCreateView(generics.CreateAPIView):
                     "unit": request.data.get(f"questions[{index}][unit]"),
                     "question_type": request.data.get(f"questions[{index}][question_type]"),
                     "comment": request.data.get(f"questions[{index}][comment]"),
-                    "explanation": request.data.get(f"questions[{index}][explanation]"),
+                    "explanation_text": request.data.get(
+                        f"questions[{index}][explanation_text]",
+                        request.data.get(f"questions[{index}][explanation]"),
+                    ),
+                    "explanation_video_url": request.data.get(f"questions[{index}][explanation_video_url]"),
                 }
                 image_key = f"questions[{index}][image]"
                 if image_key in request.FILES:
                     data["image"] = request.FILES[image_key]
+                audio_key = f"questions[{index}][explanation_recorded_audio]"
+                if audio_key in request.FILES:
+                    data["explanation_recorded_audio"] = request.FILES[audio_key]
                 serializer = self.get_serializer(data=data)
                 serializer.is_valid(raise_exception=True)
                 question = serializer.save()
@@ -561,6 +584,8 @@ class AddManualExamQuestionsView(APIView):
         data = _strip_parser_artifacts(request.data)
         if "image" in request.FILES:
             data["image"] = request.FILES["image"]
+        if "explanation_recorded_audio" in request.FILES:
+            data["explanation_recorded_audio"] = request.FILES["explanation_recorded_audio"]
         serializer = QuestionSerializer(data=data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         question = serializer.save()

@@ -195,7 +195,9 @@ class Question(models.Model):
         symmetrical=True,
         help_text="Questions that are similar to this question"
     )
-    explanation = models.CharField(max_length=250, null=True, blank=True, help_text="Explanation for the question")
+    explanation_text = models.TextField(null=True, blank=True, help_text="Explanation text for the question")
+    explanation_video_url = models.URLField(max_length=500, null=True, blank=True, help_text="Explanation video URL for the question")
+    explanation_recorded_audio = models.FileField(upload_to='question_explanations/audio/', null=True, blank=True, help_text="Recorded audio explanation for the question")
 
     class Meta:
         indexes = [
