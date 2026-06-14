@@ -72,11 +72,15 @@ old/
 old_*/
 *_old/
 
-# Migration files (uncomment if you want to ignore them)
-# migrations/
-# !migrations/__init__.py
+# JSON and Markdown files
+*.json
+*.md
+
+# Migration files
+migrations/
 
 # Test files
+tests.py
 test_script.py
 test_*.py
 *_tests.py

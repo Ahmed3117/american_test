@@ -32,6 +32,7 @@ from exam.models import (
     ResultTrial,
     Submission,
     TempExamAllowedTimes,
+    Year,
 )
 from student.models import Student
 from subscription.models import CourseSubscription
@@ -55,6 +56,7 @@ from dashboard.serializers.exam.exam import (
     ResultTrialSerializer,
     StudentDidNotTakeExamSerializer,
     TempExamAllowedTimesSerializer,
+    YearSerializer,
 )
 
 
@@ -286,8 +288,29 @@ class QuestionCategoryRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAP
     serializer_class = QuestionCategorySerializer
 
 
+class YearListCreateView(generics.ListCreateAPIView):
+    queryset = Year.objects.all()
+    serializer_class = YearSerializer
+    permission_classes = STAFF_PERMISSIONS
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    search_fields = ["value"]
+    ordering_fields = ["value", "id"]
+    ordering = ["-value"]
+
+
+class YearRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
+    queryset = Year.objects.all()
+    serializer_class = YearSerializer
+    permission_classes = STAFF_PERMISSIONS
+
+
 class QuestionListCreateView(generics.ListCreateAPIView):
-    queryset = Question.objects.select_related("course", "unit", "category").prefetch_related("answers").order_by("-created", "-id")
+    queryset = (
+        Question.objects
+        .select_related("course", "unit", "category")
+        .prefetch_related("answers", "years")
+        .order_by("-created", "-id")
+    )
     permission_classes = STAFF_PERMISSIONS
     serializer_class = QuestionSerializer
     parser_classes = (MultiPartParser, FormParser, JSONParser)
@@ -299,8 +322,20 @@ class QuestionListCreateView(generics.ListCreateAPIView):
         "difficulty": ["exact"],
         "category": ["exact"],
         "question_type": ["exact"],
+        "years": ["exact"],
     }
     search_fields = ["text", "answers__text"]
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        # multi-year support: ?years=2022,2024,2025 (accepts ids OR values)
+        years_param = self.request.query_params.get("years")
+        if years_param:
+            raw = [v.strip() for v in years_param.split(",") if v.strip()]
+            value_ids = [int(v) for v in raw if v.lstrip("-").isdigit()]
+            if value_ids:
+                qs = qs.filter(years__value__in=value_ids).distinct()
+        return qs
 
     def create(self, request, *args, **kwargs):
         if "answers" in request.data and not _has_indexed_answers(request.data):
@@ -392,6 +427,17 @@ class BulkQuestionCreateView(generics.CreateAPIView):
                 question = serializer.save()
                 if exam:
                     ExamQuestion.objects.get_or_create(exam=exam, question=question)
+
+                # Attach years (comma-separated values or list of values)
+                years_raw = request.data.get(f"questions[{index}][years]")
+                if years_raw:
+                    if isinstance(years_raw, str):
+                        year_values = [int(v) for v in years_raw.split(",") if v.strip()]
+                    else:
+                        year_values = [int(v) for v in years_raw]
+                    year_objs = [Year.objects.get_or_create(value=v)[0] for v in year_values]
+                    question.years.set(year_objs)
+
                 answer_index = 0
                 while f"questions[{index}][answers][{answer_index}][text]" in request.data:
                     payload = _answer_payload_from_request(request, f"questions[{index}][answers][{answer_index}]")

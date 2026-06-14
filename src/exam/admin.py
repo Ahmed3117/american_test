@@ -1,17 +1,27 @@
 from django.contrib import admin
 
-from exam.models import StudentBank, TempExam, TempExamAllowedTimes, Answer, EssaySubmission, Exam, ExamQuestion, Question, QuestionCategory, Result, ResultTrial, Submission, AdminQuestionBank, StudentCreatedExam
+from exam.models import StudentBank, TempExam, TempExamAllowedTimes, Answer, EssaySubmission, Exam, ExamQuestion, Question, QuestionCategory, Result, ResultTrial, Submission, AdminQuestionBank, StudentCreatedExam, Year
 
 # Register your models here.
 
 class QuestionAdmin(admin.ModelAdmin):
     list_display = ('id','text', 'points', 'difficulty', 'category', 'course', 'unit', 'is_active', 'created')
     list_editable = ('is_active',)
+    list_filter = ('difficulty', 'is_active', 'question_type', 'course', 'unit', 'category', 'years')
+    filter_horizontal = ('similar_questions', 'years')
+    search_fields = ('text', 'answers__text')
 
 admin.site.register(Exam)
 admin.site.register(QuestionCategory)
 admin.site.register(Question, QuestionAdmin)
 admin.site.register(Answer)
+
+
+@admin.register(Year)
+class YearAdmin(admin.ModelAdmin):
+    list_display = ("id", "value")
+    search_fields = ("value",)
+    ordering = ("-value",)
 # admin.site.register(Submission)
 # admin.site.register(EssaySubmission)
 # admin.site.register(Result)

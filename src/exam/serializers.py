@@ -102,10 +102,14 @@ class AnswerSerializer(serializers.ModelSerializer):
 
 class QuestionSerializerWithoutCorrectAnswer(serializers.ModelSerializer):
     answers = AnswerSerializer(many=True, required=False)
+    years = serializers.SerializerMethodField()
 
     class Meta:
         model = Question
-        fields = ['id', 'text', 'explanation_text', 'explanation_video_url', 'explanation_recorded_audio', 'image', 'points', 'difficulty', 'category', 'course', 'unit', 'is_active', 'answers', 'question_type']
+        fields = ['id', 'text', 'explanation_text', 'explanation_video_url', 'explanation_recorded_audio', 'image', 'points', 'difficulty', 'category', 'course', 'unit', 'is_active', 'answers', 'question_type', 'years']
+
+    def get_years(self, obj):
+        return [{"id": y.id, "value": y.value} for y in obj.years.all()]
 
 class AnswerSerializerWithCorrectAnswer(serializers.ModelSerializer):
     class Meta:
@@ -114,10 +118,14 @@ class AnswerSerializerWithCorrectAnswer(serializers.ModelSerializer):
 
 class QuestionSerializerWithCorrectAnswer(serializers.ModelSerializer):
     answers = AnswerSerializerWithCorrectAnswer(many=True, required=False)
+    years = serializers.SerializerMethodField()
 
     class Meta:
         model = Question
-        fields = ['id', 'text', 'explanation_text', 'explanation_video_url', 'explanation_recorded_audio', 'image', 'points', 'difficulty', 'category', 'course', 'unit', 'is_active', 'answers', 'question_type']
+        fields = ['id', 'text', 'explanation_text', 'explanation_video_url', 'explanation_recorded_audio', 'image', 'points', 'difficulty', 'category', 'course', 'unit', 'is_active', 'answers', 'question_type', 'years']
+
+    def get_years(self, obj):
+        return [{"id": y.id, "value": y.value} for y in obj.years.all()]
 
 
 class StudentExamResultSerializer(serializers.ModelSerializer):

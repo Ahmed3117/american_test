@@ -167,9 +167,28 @@ class Exam(models.Model):
 
 class QuestionCategory(models.Model):
     title = models.CharField(max_length=200)
-    
+
     def __str__(self):
         return self.title
+
+
+class Year(models.Model):
+    """
+    Represents a calendar year (e.g. 2022, 2024, 2025) that a question
+    was part of its main exam. Pure reference data — questions are NOT
+    deleted when a year is deleted (M2M lives on the Question side, so
+    the junction rows simply disappear).
+    """
+    value = models.PositiveIntegerField(unique=True)
+
+    class Meta:
+        ordering = ["-value"]
+        verbose_name = "Year"
+        verbose_name_plural = "Years"
+
+    def __str__(self):
+        return str(self.value)
+
 
 class Question(models.Model):
     text = models.TextField()
@@ -198,6 +217,13 @@ class Question(models.Model):
     explanation_text = models.TextField(null=True, blank=True, help_text="Explanation text for the question")
     explanation_video_url = models.URLField(max_length=500, null=True, blank=True, help_text="Explanation video URL for the question")
     explanation_recorded_audio = models.FileField(upload_to='question_explanations/audio/', null=True, blank=True, help_text="Recorded audio explanation for the question")
+    years = models.ManyToManyField(
+        "Year",
+        blank=True,
+        related_name="questions",
+        help_text="Years in which this question was part of the main exam "
+                  "(a question may belong to zero, one, or many years).",
+    )
 
     class Meta:
         indexes = [

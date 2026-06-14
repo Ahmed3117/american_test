@@ -12,7 +12,7 @@ from accounts.models import User, UserDevice, OTP
 from student.models import Student
 from course.models import Course, Unit, File
 from exam.models import (
-    Question, Answer, QuestionCategory, Exam, ExamQuestion,
+    Question, Answer, QuestionCategory, Year, Exam, ExamQuestion,
     ExamModel, ExamModelQuestion, RandomExamBank
 )
 from subscription.models import Plan, PlanSubscription, CourseSubscription
@@ -93,8 +93,12 @@ class Command(BaseCommand):
         ExamModel.objects.all().delete()
         Exam.objects.all().delete()
         Answer.objects.all().delete()
+        # Delete Year last so the M2M through table is cleared first
+        # (deleting a year does not cascade to questions, but the
+        # through table must be empty before we delete Question rows).
         Question.objects.all().delete()
         QuestionCategory.objects.all().delete()
+        Year.objects.all().delete()
         Unit.objects.all().delete()
         Course.objects.all().delete()
         Student.objects.all().delete()
@@ -218,10 +222,18 @@ class Command(BaseCommand):
                     'difficulty': q_data.get('difficulty', 'EASY'),
                     'question_type': q_data.get('question_type', 'MCQ'),
                     'category': category,
-                    'explanation': q_data.get('explanation', ''),
+                    'explanation_text': q_data.get('explanation_text', q_data.get('explanation', '')),
+                    'explanation_video_url': q_data.get('explanation_video_url'),
                     'is_active': True,
                 }
             )
+
+            # Attach years (list of integer values) — auto-create missing
+            year_values = q_data.get('years') or []
+            if year_values:
+                year_objs = [Year.objects.get_or_create(value=int(v))[0] for v in year_values]
+                question.years.set(year_objs)
+
             questions.append(question)
 
             if question.question_type == 'MCQ':

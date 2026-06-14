@@ -16,6 +16,7 @@ from exam.models import (
     Result,
     ResultTrial,
     TempExamAllowedTimes,
+    Year,
 )
 from student.models import Student
 
@@ -36,6 +37,11 @@ class AnswerSerializer(serializers.ModelSerializer):
 class QuestionSerializer(serializers.ModelSerializer):
     answers = AnswerSerializer(many=True, required=False)
     image = serializers.ImageField(required=False, allow_null=True)
+    years = serializers.PrimaryKeyRelatedField(
+        many=True,
+        queryset=Year.objects.all(),
+        required=False,
+    )
 
     class Meta:
         model = Question
@@ -56,6 +62,7 @@ class QuestionSerializer(serializers.ModelSerializer):
             "question_type",
             "comment",
             "created",
+            "years",
         ]
         read_only_fields = ["id", "created"]
 
@@ -72,16 +79,23 @@ class QuestionSerializer(serializers.ModelSerializer):
 
     def create(self, validated_data):
         answers_data = validated_data.pop("answers", [])
+        years_data = validated_data.pop("years", [])
         question = Question.objects.create(**validated_data)
+        if years_data:
+            question.years.set(years_data)
         for answer_data in answers_data:
             Answer.objects.create(question=question, **answer_data)
         return question
 
     def update(self, instance, validated_data):
         answers_data = validated_data.pop("answers", None)
+        years_data = validated_data.pop("years", None)
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
+
+        if years_data is not None:
+            instance.years.set(years_data)
 
         if answers_data is not None:
             instance.answers.all().delete()
@@ -92,6 +106,7 @@ class QuestionSerializer(serializers.ModelSerializer):
     def to_representation(self, instance):
         data = super().to_representation(instance)
         data["answers"] = AnswerSerializer(instance.answers.all(), many=True, context=self.context).data
+        data["years"] = YearSerializer(instance.years.all(), many=True, context=self.context).data
         return data
 
 
@@ -198,6 +213,12 @@ class QuestionCategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = QuestionCategory
         fields = ["id", "title"]
+
+
+class YearSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Year
+        fields = ["id", "value"]
 
 
 class EssaySubmissionSerializer(serializers.ModelSerializer):
