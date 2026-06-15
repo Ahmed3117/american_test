@@ -119,13 +119,25 @@ class StartExam(APIView):
         result.exam_model = exam_model
         result.save()
 
-        questions = [mq.question for mq in exam_model.model_questions.filter(is_active=True)]
+        questions = list(
+            ExamModelQuestion.objects
+            .filter(exam_model=exam_model, is_active=True)
+            .select_related("question")
+            .prefetch_related("question__answers", "question__years")
+        )
+        questions = [mq.question for mq in questions]
         if exam.show_questions_in_random:
             random.shuffle(questions)  # Shuffle the questions
         return questions, exam_model
 
     def _get_manual_exam_questions(self, exam):
-        questions = [eq.question for eq in ExamQuestion.objects.filter(exam=exam, question__is_active=True)]
+        questions = list(
+            ExamQuestion.objects
+            .filter(exam=exam, question__is_active=True)
+            .select_related("question")
+            .prefetch_related("question__answers", "question__years")
+        )
+        questions = [eq.question for eq in questions]
         if exam.show_questions_in_random:
             random.shuffle(questions)  # Shuffle the questions
         return questions, None
@@ -582,6 +594,9 @@ class GetMyExamResult(APIView):
                 "question_text": question.text if question else None,
                 "question_image": question.image.url if question and question.image else None,
                 "question_comment": question.comment,
+                "question_years": [
+                    {"id": y.id, "value": y.value} for y in question.years.all()
+                ] if question else [],
                 **_question_explanation_fields(question),
                 "selected_answer": selected_answer_obj,  # Updated to include full object
                 "is_correct": submission.is_correct if submission.is_correct is not None else False,
@@ -606,6 +621,9 @@ class GetMyExamResult(APIView):
                 "question_text": question.text if question else None,
                 "question_image": question.image.url if question and question.image else None,
                 "question_comment": question.comment,
+                "question_years": [
+                    {"id": y.id, "value": y.value} for y in question.years.all()
+                ] if question else [],
                 **_question_explanation_fields(question),
                 "answer_text": submission.answer_text,
                 "answer_file": submission.answer_file.url if submission.answer_file else None,
@@ -624,6 +642,9 @@ class GetMyExamResult(APIView):
                 "question_image": question.image.url if question.image else None,
                 "question_type": question.question_type,
                 "question_comment": question.comment,
+                "question_years": [
+                    {"id": y.id, "value": y.value} for y in question.years.all()
+                ],
                 **_question_explanation_fields(question),
                 "correct_answers": [
                     {"text": answer.text, "image": answer.image.url if answer.image else None}
@@ -748,6 +769,9 @@ class GetMyExamResultForTrial(APIView):
                 "question_text": question.text if question else None,
                 "question_image": question.image.url if question and question.image else None,
                 "question_comment": question.comment,
+                "question_years": [
+                    {"id": y.id, "value": y.value} for y in question.years.all()
+                ] if question else [],
                 **_question_explanation_fields(question),
                 "selected_answer": selected_answer_obj,
                 "is_correct": submission.is_correct if submission.is_correct is not None else False,
@@ -769,6 +793,9 @@ class GetMyExamResultForTrial(APIView):
                 "question_text": question.text if question else None,
                 "question_image": question.image.url if question and question.image else None,
                 "question_comment": question.comment,
+                "question_years": [
+                    {"id": y.id, "value": y.value} for y in question.years.all()
+                ] if question else [],
                 **_question_explanation_fields(question),
                 "answer_text": submission.answer_text,
                 "answer_file": submission.answer_file.url if submission.answer_file else None,
@@ -787,6 +814,9 @@ class GetMyExamResultForTrial(APIView):
                 "question_image": question.image.url if question.image else None,
                 "question_type": question.question_type,
                 "question_comment": question.comment,
+                "question_years": [
+                    {"id": y.id, "value": y.value} for y in question.years.all()
+                ],
                 **_question_explanation_fields(question),
                 "correct_answers": [
                     {"text": answer.text, "image": answer.image.url if answer.image else None}

@@ -155,6 +155,9 @@ def _serialize_trial_answer(submission):
         "question_text": question.text,
         "question_image": question.image.url if question.image else None,
         "question_comment": question.comment,
+        "question_years": [
+            {"id": y.id, "value": y.value} for y in question.years.all()
+        ],
         **_question_explanation_fields(question),
         "selected_answer": selected_answer,
         "is_correct": submission.is_correct,
@@ -175,6 +178,9 @@ def _serialize_essay_submission(submission):
         "question_text": question.text,
         "question_image": question.image.url if question.image else None,
         "question_comment": question.comment,
+        "question_years": [
+            {"id": y.id, "value": y.value} for y in question.years.all()
+        ],
         **_question_explanation_fields(question),
         "answer_text": submission.answer_text,
         "answer_file": submission.answer_file.url if submission.answer_file else None,

@@ -130,9 +130,10 @@ class SubscribePlanSerializer(serializers.Serializer):
 
         unique_ids = list(dict.fromkeys(value))
         plan = self.context["plan"]
-        if len(unique_ids) > plan.number_of_allowed_courses_to_subscribe:
+        allowed_courses = plan.number_of_allowed_courses_to_subscribe
+        if len(unique_ids) != allowed_courses:
             raise serializers.ValidationError(
-                f"هذا الباقة تسمح بـ {plan.number_of_allowed_courses_to_subscribe} مادة/مواد فقط"
+                f"يجب اختيار {allowed_courses} مادة/مواد بالضبط لهذه الباقة"
             )
         courses_count = Course.objects.filter(id__in=unique_ids, is_active=True).count()
         if courses_count != len(unique_ids):
