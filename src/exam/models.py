@@ -179,7 +179,7 @@ class Year(models.Model):
     deleted when a year is deleted (M2M lives on the Question side, so
     the junction rows simply disappear).
     """
-    value = models.PositiveIntegerField(unique=True)
+    value = models.CharField(max_length=10, unique=True)
 
     class Meta:
         ordering = ["-value"]

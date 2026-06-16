@@ -1,3 +1,4 @@
+import json
 import random
 
 from django.core.exceptions import ValidationError
@@ -125,6 +126,40 @@ def _coerce_int_list(values):
     if invalid:
         return None, f"Invalid question IDs: {invalid}"
     return cleaned, None
+
+
+def _parse_year_id_list(value):
+    """Normalize the `years` form field into a flat list of Year primary keys.
+
+    Accepts, for a single field, any of:
+      * a list (already parsed, e.g. repeated `years=1&years=2`),
+      * a JSON-array string `"[1,4,2]"`,
+      * a comma-separated string `"1,4,2"`.
+
+    Returns the list of ints, or raises `ValueError` when something is not an int.
+    """
+    if value in (None, ""):
+        return []
+    if isinstance(value, (list, tuple)):
+        raw_items = value
+    else:
+        text = str(value).strip()
+        if text.startswith("["):
+            try:
+                raw_items = json.loads(text)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid JSON for years list: {exc.msg}") from exc
+            if not isinstance(raw_items, list):
+                raise ValueError("years must be a JSON array of integers")
+        else:
+            raw_items = [piece for piece in text.split(",") if piece.strip() != ""]
+    ids = []
+    for item in raw_items:
+        try:
+            ids.append(int(item))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Year id must be an integer, got {item!r}") from exc
+    return ids
 
 
 def _serialize_trial_answer(submission):
@@ -338,7 +373,7 @@ class QuestionListCreateView(generics.ListCreateAPIView):
         years_param = self.request.query_params.get("years")
         if years_param:
             raw = [v.strip() for v in years_param.split(",") if v.strip()]
-            value_ids = [int(v) for v in raw if v.lstrip("-").isdigit()]
+            value_ids = [v for v in raw if v]
             if value_ids:
                 qs = qs.filter(years__value__in=value_ids).distinct()
         return qs
@@ -374,7 +409,21 @@ class QuestionRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
 
     def patch(self, request, *args, **kwargs):
         instance = self.get_object()
-        response = super().patch(request, *args, **kwargs)
+
+        if "answers" in request.data and not _has_indexed_answers(request.data):
+            return super().patch(request, *args, **kwargs)
+
+        data = _strip_parser_artifacts(request.data)
+        if "image" in request.FILES:
+            data["image"] = request.FILES["image"]
+        if "explanation_recorded_audio" in request.FILES:
+            data["explanation_recorded_audio"] = request.FILES["explanation_recorded_audio"]
+
+        serializer = self.get_serializer(instance, data=data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        processed_ids = []
         index = 0
         while f"answers[{index}][text]" in request.data:
             answer_id = request.data.get(f"answers[{index}][id]")
@@ -382,13 +431,22 @@ class QuestionRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
             payload["question"] = instance.id
             if answer_id:
                 answer = get_object_or_404(Answer, id=answer_id, question=instance)
-                serializer = AnswerSerializer(answer, data=payload, partial=True)
+                answer_serializer = AnswerSerializer(answer, data=payload, partial=True)
+                answer_serializer.is_valid(raise_exception=True)
+                answer_serializer.save()
+                processed_ids.append(int(answer_id))
             else:
-                serializer = AnswerSerializer(data=payload)
-            serializer.is_valid(raise_exception=True)
-            serializer.save()
+                answer_serializer = AnswerSerializer(data=payload)
+                answer_serializer.is_valid(raise_exception=True)
+                saved = answer_serializer.save()
+                processed_ids.append(saved.id)
             index += 1
-        return response
+
+        if processed_ids:
+            instance.answers.exclude(id__in=processed_ids).delete()
+
+        instance = self.get_object()
+        return Response(self.get_serializer(instance).data)
 
 
 class BulkQuestionCreateView(generics.CreateAPIView):
@@ -434,15 +492,32 @@ class BulkQuestionCreateView(generics.CreateAPIView):
                 if exam:
                     ExamQuestion.objects.get_or_create(exam=exam, question=question)
 
-                # Attach years (comma-separated values or list of values)
+                # Attach years (list of Year primary keys).
+                # Accepts JSON-array string "[1,4,2]", comma-separated "1,4,2",
+                # or repeated fields. Years are looked up by ID; an unknown ID
+                # returns 400.
                 years_raw = request.data.get(f"questions[{index}][years]")
-                if years_raw:
-                    if isinstance(years_raw, str):
-                        year_values = [int(v) for v in years_raw.split(",") if v.strip()]
-                    else:
-                        year_values = [int(v) for v in years_raw]
-                    year_objs = [Year.objects.get_or_create(value=v)[0] for v in year_values]
-                    question.years.set(year_objs)
+                if years_raw not in (None, ""):
+                    try:
+                        year_ids = _parse_year_id_list(years_raw)
+                    except ValueError as exc:
+                        return Response(
+                            {"error": str(exc), "field": f"questions[{index}][years]"},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                    if year_ids:
+                        existing = Year.objects.filter(id__in=year_ids)
+                        missing = sorted(set(year_ids) - set(existing.values_list("id", flat=True)))
+                        if missing:
+                            return Response(
+                                {
+                                    "error": "سنة غير موجودة",
+                                    "missing_year_ids": missing,
+                                    "field": f"questions[{index}][years]",
+                                },
+                                status=status.HTTP_400_BAD_REQUEST,
+                            )
+                        question.years.set(existing)
 
                 answer_index = 0
                 while f"questions[{index}][answers][{answer_index}][text]" in request.data:
@@ -638,6 +713,14 @@ class AddManualExamQuestionsView(APIView):
             data["image"] = request.FILES["image"]
         if "explanation_recorded_audio" in request.FILES:
             data["explanation_recorded_audio"] = request.FILES["explanation_recorded_audio"]
+        if "years" in data and data["years"] not in (None, ""):
+            try:
+                data["years"] = _parse_year_id_list(data["years"])
+            except ValueError as exc:
+                return Response(
+                    {"error": str(exc), "field": "years"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
         serializer = QuestionSerializer(data=data, context={"request": request})
         serializer.is_valid(raise_exception=True)
         question = serializer.save()

@@ -98,9 +98,21 @@ class QuestionSerializer(serializers.ModelSerializer):
             instance.years.set(years_data)
 
         if answers_data is not None:
-            instance.answers.all().delete()
-            for answer_data in answers_data:
-                Answer.objects.create(question=instance, **answer_data)
+            raw_answers = self.initial_data.get("answers", [])
+            processed_ids = []
+            for i, answer_data in enumerate(answers_data):
+                raw_id = raw_answers[i].get("id") if i < len(raw_answers) else None
+                if raw_id and instance.answers.filter(id=raw_id).exists():
+                    Answer.objects.filter(id=raw_id, question=instance).update(**answer_data)
+                    processed_ids.append(int(raw_id))
+                else:
+                    answer = Answer.objects.create(question=instance, **answer_data)
+                    processed_ids.append(answer.id)
+            instance.answers.exclude(id__in=processed_ids).delete()
+            try:
+                del instance._prefetched_objects_cache['answers']
+            except (AttributeError, KeyError):
+                pass
         return instance
 
     def to_representation(self, instance):

@@ -231,7 +231,7 @@ class Command(BaseCommand):
             # Attach years (list of integer values) — auto-create missing
             year_values = q_data.get('years') or []
             if year_values:
-                year_objs = [Year.objects.get_or_create(value=int(v))[0] for v in year_values]
+                year_objs = [Year.objects.get_or_create(value=str(v))[0] for v in year_values]
                 question.years.set(year_objs)
 
             questions.append(question)
