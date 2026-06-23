@@ -10,7 +10,7 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import generics, status
 from rest_framework.filters import OrderingFilter, SearchFilter
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
-from rest_framework.permissions import IsAdminUser, IsAuthenticated
+from rest_framework.permissions import AllowAny, IsAdminUser, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -337,6 +337,13 @@ class YearListCreateView(generics.ListCreateAPIView):
     search_fields = ["value"]
     ordering_fields = ["value", "id"]
     ordering = ["-value"]
+
+
+class YearListAllView(generics.ListAPIView):
+    queryset = Year.objects.all().order_by("-value")
+    serializer_class = YearSerializer
+    permission_classes = [AllowAny]
+    pagination_class = None
 
 
 class YearRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):

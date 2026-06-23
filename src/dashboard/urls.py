@@ -19,6 +19,7 @@ urlpatterns = [
     path("question-categories/", exam_views.QuestionCategoryListCreateView.as_view(), name="question-category-list-create"),
     path("question-categories/<int:pk>/", exam_views.QuestionCategoryRetrieveUpdateDestroyView.as_view(), name="question-category-detail"),
     path("years/", exam_views.YearListCreateView.as_view(), name="year-list-create"),
+    path("years/all/", exam_views.YearListAllView.as_view(), name="year-list-all"),
     path("years/<int:pk>/", exam_views.YearRetrieveUpdateDestroyView.as_view(), name="year-detail"),
     path("questions/", exam_views.QuestionListCreateView.as_view(), name="question-list-create"),
     path("questions/<int:pk>/", exam_views.QuestionRetrieveUpdateDestroyView.as_view(), name="question-detail"),

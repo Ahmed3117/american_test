@@ -615,11 +615,10 @@ class ExamQuestionReorderSerializer(serializers.Serializer):
 class ExamQuestionSerializer(serializers.ModelSerializer):
     exam_question_id = serializers.IntegerField(source="id", read_only=True)
     question = QuestionSerializer(read_only=True)
-    question_details = QuestionSerializer(source="question", read_only=True)
 
     class Meta:
         model = ExamQuestion
-        fields = ["id", "exam_question_id", "exam", "question", "question_details", "is_active", "order", "created"]
+        fields = ["id", "exam_question_id", "exam", "question", "is_active", "order", "created"]
         read_only_fields = ["id", "exam_question_id", "created"]
 
     def to_representation(self, instance):
