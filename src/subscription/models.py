@@ -1,12 +1,20 @@
 import calendar
+import secrets
 from datetime import date
+from decimal import Decimal, ROUND_HALF_UP
 
 from django.core.exceptions import ValidationError
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils import timezone
 
 from course.models import Course
 from student.models import Student
+
+
+def generate_discount_coupon_code():
+    """Return a ten-digit coupon code without zeroes."""
+    return "".join(secrets.choice("123456789") for _ in range(10))
 
 
 class Plan(models.Model):
@@ -75,6 +83,45 @@ class Plan(models.Model):
         return self.is_active and start <= current_date <= end
 
 
+class DiscountCoupon(models.Model):
+    plan = models.ForeignKey(
+        Plan,
+        on_delete=models.CASCADE,
+        related_name="discount_coupons",
+        null=True,
+        blank=True,
+    )
+    coupon = models.CharField(
+        max_length=10,
+        unique=True,
+        default=generate_discount_coupon_code,
+        editable=False,
+    )
+    discount_percentage = models.PositiveSmallIntegerField(
+        validators=[MinValueValidator(1), MaxValueValidator(100)]
+    )
+    valid_from = models.DateTimeField()
+    valid_to = models.DateTimeField()
+    is_active = models.BooleanField(default=True)
+    max_using_number = models.PositiveIntegerField(default=1, validators=[MinValueValidator(1)])
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.coupon} - {self.plan or 'All plans'}"
+
+    def clean(self):
+        if self.valid_from and self.valid_to and self.valid_to <= self.valid_from:
+            raise ValidationError({"valid_to": "valid_to must be later than valid_from."})
+
+    def is_valid_at(self, current_time=None):
+        current_time = current_time or timezone.now()
+        return self.is_active and self.valid_from <= current_time <= self.valid_to
+
+
 class PlanSubscription(models.Model):
     PAYMENT_PENDING = "pending"
     PAYMENT_PAID = "paid"
@@ -93,6 +140,17 @@ class PlanSubscription(models.Model):
     student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name="plan_subscriptions")
     plan = models.ForeignKey(Plan, on_delete=models.PROTECT, related_name="subscriptions")
     courses = models.ManyToManyField(Course, through="PlanSubscriptionCourse", related_name="plan_subscriptions")
+    discount_coupon = models.ForeignKey(
+        DiscountCoupon,
+        on_delete=models.SET_NULL,
+        related_name="subscriptions",
+        null=True,
+        blank=True,
+    )
+    original_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    discount_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    payable_amount = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
+    coupon_applied_at = models.DateTimeField(null=True, blank=True)
     payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS_CHOICES, default=PAYMENT_PENDING)
     easypay_invoice_uid = models.CharField(max_length=120, blank=True, null=True)
     easypay_invoice_sequence = models.CharField(max_length=120, blank=True, null=True)
@@ -115,6 +173,31 @@ class PlanSubscription(models.Model):
     @property
     def has_access_now(self):
         return self.is_paid and self.plan.is_currently_available()
+
+    @property
+    def invoice_amount(self):
+        return self.payable_amount if self.payable_amount is not None else self.plan.price
+
+    def apply_discount_coupon(self, coupon):
+        original_price = self.plan.price
+        discount_amount = (
+            original_price * Decimal(coupon.discount_percentage) / Decimal("100")
+        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        self.discount_coupon = coupon
+        self.original_price = original_price
+        self.discount_amount = discount_amount
+        self.payable_amount = max(original_price - discount_amount, Decimal("0.00"))
+        self.coupon_applied_at = timezone.now()
+        self.save(
+            update_fields=[
+                "discount_coupon",
+                "original_price",
+                "discount_amount",
+                "payable_amount",
+                "coupon_applied_at",
+                "updated_at",
+            ]
+        )
 
     def clean(self):
         if self.plan and self.pk:

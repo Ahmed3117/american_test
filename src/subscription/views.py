@@ -1,6 +1,7 @@
 from django.db import transaction
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, status
+from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -8,8 +9,13 @@ from rest_framework.views import APIView
 from course.models import Course
 from services.easypay_service import easypay_service
 
-from .models import Plan, PlanSubscription
-from .serializers import PlanSerializer, PlanSubscriptionSerializer, SubscribePlanSerializer
+from .models import DiscountCoupon, Plan, PlanSubscription
+from .serializers import (
+    ApplyDiscountCouponSerializer,
+    PlanSerializer,
+    PlanSubscriptionSerializer,
+    SubscribePlanSerializer,
+)
 from .services import create_plan_subscription_invoice
 
 
@@ -161,6 +167,58 @@ class CreatePlanSubscriptionInvoiceView(APIView):
         response["payment"] = invoice_result
         status_code = status.HTTP_200_OK if invoice_result.get("success") else status.HTTP_502_BAD_GATEWAY
         return Response(response, status=status_code)
+
+
+class ApplyDiscountCouponView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, subscription_id):
+        serializer = ApplyDiscountCouponSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        with transaction.atomic():
+            subscription = get_object_or_404(
+                PlanSubscription.objects.select_for_update().select_related(
+                    "plan", "student", "discount_coupon"
+                ),
+                pk=subscription_id,
+            )
+            request_student = getattr(request.user, "student", None)
+            if not request_student or subscription.student_id != request_student.id:
+                return Response({"error": "غير مصرح"}, status=status.HTTP_403_FORBIDDEN)
+
+            if subscription.is_paid:
+                raise ValidationError({"coupon": ["A coupon cannot be applied to a paid subscription."]})
+            if subscription.easypay_invoice_uid or subscription.easypay_invoice_sequence:
+                raise ValidationError({"coupon": ["A coupon cannot be applied after invoice generation."]})
+
+            coupon_code = serializer.validated_data["coupon"]
+            if subscription.discount_coupon_id:
+                if subscription.discount_coupon.coupon == coupon_code:
+                    response = PlanSubscriptionSerializer(
+                        subscription, context={"request": request}
+                    ).data
+                    return Response(response)
+                raise ValidationError({"coupon": ["A coupon has already been applied to this subscription."]})
+
+            coupon = (
+                DiscountCoupon.objects.select_for_update()
+                .filter(coupon=coupon_code)
+                .first()
+            )
+            if not coupon:
+                raise ValidationError({"coupon": ["Invalid coupon."]})
+            if coupon.plan_id is not None and coupon.plan_id != subscription.plan_id:
+                raise ValidationError({"coupon": ["This coupon does not apply to the selected plan."]})
+            if not coupon.is_valid_at():
+                raise ValidationError({"coupon": ["This coupon is inactive or outside its validity period."]})
+            if coupon.subscriptions.count() >= coupon.max_using_number:
+                raise ValidationError({"coupon": ["This coupon has reached its maximum usage limit."]})
+
+            subscription.apply_discount_coupon(coupon)
+
+        response = PlanSubscriptionSerializer(subscription, context={"request": request}).data
+        return Response(response)
 
 
 class ManualConfirmPlanSubscriptionView(APIView):

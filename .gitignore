@@ -73,17 +73,17 @@ old_*/
 *_old/
 
 # JSON and Markdown files
-*.json
-*.md
+**/*.json
+**/*.md
 
 # Migration files
-migrations/
+**/migrations/
 
 # Test files
 tests.py
 test_script.py
-test_*.py
-*_tests.py
+**/test_*.py
+**/*_tests.py
 
 # Temporary files
 temp/

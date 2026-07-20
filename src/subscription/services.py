@@ -20,7 +20,7 @@ def create_plan_subscription_invoice(subscription):
 
     profile_source = type("ProfileSource", (), {"user": subscription.student.user, "id": subscription.id})()
     profile = get_customer_profile(profile_source)
-    amount = f"{subscription.plan.price:.2f}"
+    amount = f"{subscription.invoice_amount:.2f}"
     profile_id = f"plan-subscription-{subscription.id}"
     signature = hashlib.sha256(
         f"{easypay_service.vendor_code}{easypay_service.secret_key}{amount}{profile_id}{profile['phone']}".encode("utf-8")

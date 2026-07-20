@@ -3,7 +3,7 @@ from rest_framework import serializers
 from course.models import Course
 from course.serializers import CourseSerializer
 
-from .models import Plan, PlanSubscription
+from .models import DiscountCoupon, Plan, PlanSubscription
 
 
 class PlanSerializer(serializers.ModelSerializer):
@@ -97,10 +97,57 @@ class PlanSerializer(serializers.ModelSerializer):
         attrs[month_field] = month
 
 
+class DiscountCouponSerializer(serializers.ModelSerializer):
+    usage_count = serializers.SerializerMethodField()
+    remaining_uses = serializers.SerializerMethodField()
+
+    class Meta:
+        model = DiscountCoupon
+        fields = [
+            "id",
+            "plan",
+            "coupon",
+            "discount_percentage",
+            "valid_from",
+            "valid_to",
+            "is_active",
+            "max_using_number",
+            "usage_count",
+            "remaining_uses",
+            "created_at",
+            "updated_at",
+        ]
+        read_only_fields = ["coupon", "created_at", "updated_at"]
+
+    def validate(self, attrs):
+        instance = getattr(self, "instance", None)
+        valid_from = attrs.get("valid_from", getattr(instance, "valid_from", None))
+        valid_to = attrs.get("valid_to", getattr(instance, "valid_to", None))
+        if valid_from and valid_to and valid_to <= valid_from:
+            raise serializers.ValidationError({"valid_to": "valid_to must be later than valid_from."})
+
+        max_using_number = attrs.get(
+            "max_using_number", getattr(instance, "max_using_number", 1)
+        )
+        if instance and max_using_number < instance.subscriptions.count():
+            raise serializers.ValidationError(
+                {"max_using_number": "It cannot be less than the coupon's current usage count."}
+            )
+        return attrs
+
+    def get_usage_count(self, obj):
+        return obj.subscriptions.count()
+
+    def get_remaining_uses(self, obj):
+        return max(obj.max_using_number - obj.subscriptions.count(), 0)
+
+
 class PlanSubscriptionSerializer(serializers.ModelSerializer):
     plan = PlanSerializer(read_only=True)
     courses = CourseSerializer(many=True, read_only=True)
     has_access_now = serializers.BooleanField(read_only=True)
+    coupon = serializers.CharField(source="discount_coupon.coupon", read_only=True, allow_null=True)
+    invoice_amount = serializers.DecimalField(max_digits=10, decimal_places=2, read_only=True)
 
     class Meta:
         model = PlanSubscription
@@ -110,12 +157,25 @@ class PlanSubscriptionSerializer(serializers.ModelSerializer):
             "courses",
             "payment_status",
             "has_access_now",
+            "coupon",
+            "original_price",
+            "discount_amount",
+            "payable_amount",
+            "invoice_amount",
+            "coupon_applied_at",
             "easypay_invoice_uid",
             "easypay_invoice_sequence",
             "easypay_payment_url",
             "paid_at",
             "created_at",
         ]
+
+
+class ApplyDiscountCouponSerializer(serializers.Serializer):
+    coupon = serializers.RegexField(
+        regex=r"^[1-9]{10}$",
+        error_messages={"invalid": "Coupon must contain exactly 10 digits from 1 to 9."},
+    )
 
 
 class SubscribePlanSerializer(serializers.Serializer):

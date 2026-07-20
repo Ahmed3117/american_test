@@ -6,8 +6,12 @@ from rest_framework.views import APIView
 
 from course.models import Course, Unit
 from course.serializers import CourseSerializer, UnitSerializer
-from subscription.models import Plan, PlanSubscription
-from subscription.serializers import PlanSerializer, PlanSubscriptionSerializer
+from subscription.models import DiscountCoupon, Plan, PlanSubscription
+from subscription.serializers import (
+    DiscountCouponSerializer,
+    PlanSerializer,
+    PlanSubscriptionSerializer,
+)
 
 
 class StaffOnlyMixin:
@@ -22,6 +26,16 @@ class PlanListCreateView(StaffOnlyMixin, generics.ListCreateAPIView):
 class PlanDetailView(StaffOnlyMixin, generics.RetrieveUpdateDestroyAPIView):
     queryset = Plan.objects.all()
     serializer_class = PlanSerializer
+
+
+class DiscountCouponListCreateView(StaffOnlyMixin, generics.ListCreateAPIView):
+    queryset = DiscountCoupon.objects.select_related("plan").prefetch_related("subscriptions")
+    serializer_class = DiscountCouponSerializer
+
+
+class DiscountCouponDetailView(StaffOnlyMixin, generics.RetrieveUpdateDestroyAPIView):
+    queryset = DiscountCoupon.objects.select_related("plan").prefetch_related("subscriptions")
+    serializer_class = DiscountCouponSerializer
 
 
 class PlanSubscriptionListView(StaffOnlyMixin, generics.ListAPIView):
