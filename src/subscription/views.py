@@ -177,9 +177,12 @@ class ApplyDiscountCouponView(APIView):
         serializer.is_valid(raise_exception=True)
 
         with transaction.atomic():
+            # Keep nullable relations out of this locked query. PostgreSQL
+            # rejects FOR UPDATE when it targets the nullable side of the
+            # outer join produced by select_related("discount_coupon").
             subscription = get_object_or_404(
                 PlanSubscription.objects.select_for_update().select_related(
-                    "plan", "student", "discount_coupon"
+                    "plan", "student"
                 ),
                 pk=subscription_id,
             )
