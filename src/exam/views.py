@@ -192,7 +192,11 @@ class StartExam(APIView):
                 result_trial.save()
 
             # Serialize questions
-            question_data = [QuestionSerializerWithoutCorrectAnswer(q).data for q in questions]
+            question_data = QuestionSerializerWithoutCorrectAnswer(
+                questions,
+                many=True,
+                context={"request": request},
+            ).data
 
             return Response(
                 {
@@ -236,7 +240,11 @@ class StartExam(APIView):
                 result_trial.save()
 
             # Serialize questions
-            question_data = [QuestionSerializerWithoutCorrectAnswer(q).data for q in questions]
+            question_data = QuestionSerializerWithoutCorrectAnswer(
+                questions,
+                many=True,
+                context={"request": request},
+            ).data
 
             return Response(
                 {
