@@ -99,6 +99,7 @@ def signup(request):
         "password": "password123",
         "name": "Student Name",
         "user_type": "student",
+        "gender": "male",
         "parent_phone": "01111111111",
         "government": "1"
     }
@@ -165,6 +166,7 @@ def verify_signup_otp(request):
         "name": "Student Name",
         "otp_code": "123456",
         "user_type": "student",
+        "gender": "male",
         "parent_phone": "01111111111",
         "government": "1",
         "device_id": "optional_device_id",
@@ -892,6 +894,7 @@ class DeleteAccountView(APIView):
             name=user.name,
             email=user.email,
             user_type=user.user_type,
+            gender=user.gender,
             parent_phone=user.parent_phone,
             government=user.government,
             max_allowed_devices=user.max_allowed_devices,
@@ -906,6 +909,7 @@ class DeleteAccountView(APIView):
                 'name': user.name,
                 'email': user.email,
                 'user_type': user.user_type,
+                'gender': user.gender,
                 'parent_phone': user.parent_phone,
                 'government': user.government,
                 'created_at': user.created_at.isoformat() if user.created_at else None,
@@ -1032,6 +1036,7 @@ class UserDeleteAPIView(APIView):
                 'name': user.name,
                 'email': user.email,
                 'user_type': user.user_type,
+                'gender': user.gender,
                 'parent_phone': user.parent_phone,
                 'government': user.government,
                 'max_allowed_devices': user.max_allowed_devices,
@@ -1047,6 +1052,7 @@ class UserDeleteAPIView(APIView):
                 name=user.name,
                 email=user.email,
                 user_type=user.user_type,
+                gender=user.gender,
                 parent_phone=user.parent_phone,
                 government=user.government,
                 max_allowed_devices=user.max_allowed_devices,
@@ -1083,6 +1089,16 @@ class AdminUserFilter(filters.FilterSet):
         fields = ['is_staff', 'is_superuser', 'government']
 
 
+class StudentUserFilter(filters.FilterSet):
+    """Student filters with comma-separated support for government and gender."""
+    government = filters.BaseInFilter(field_name='government', lookup_expr='in')
+    gender = filters.BaseInFilter(field_name='gender', lookup_expr='in')
+
+    class Meta:
+        model = User
+        fields = ['is_banned', 'government', 'gender']
+
+
 class AdminsListView(generics.ListAPIView):
     """Return users who are admins (is_staff OR is_superuser)."""
     serializer_class = None
@@ -1106,10 +1122,10 @@ class UsersListView(generics.ListAPIView):
     serializer_class = None
     permission_classes = [IsAdminUser]
     filter_backends = [SearchFilter, OrderingFilter, DjangoFilterBackend]
-    ordering_fields = ['id', 'created_at', 'username', 'name', 'email']
+    ordering_fields = ['id', 'created_at', 'username', 'name', 'email', 'gender']
     ordering = ['-created_at']
     search_fields = ['username', 'name', 'email', 'government']
-    filterset_fields = ['is_banned']
+    filterset_class = StudentUserFilter
 
     def get_queryset(self):
         return User.objects.filter(is_staff=False, is_superuser=False, user_type='student').order_by('-created_at')
@@ -1138,9 +1154,9 @@ class StudentDeviceListView(generics.ListAPIView):
     permission_classes = [IsAdminUser]
     filter_backends = [SearchFilter, OrderingFilter, DjangoFilterBackend]
     search_fields = ['username', 'name']
-    ordering_fields = ['id', 'created_at', 'username', 'name', 'max_allowed_devices']
+    ordering_fields = ['id', 'created_at', 'username', 'name', 'gender', 'max_allowed_devices']
     ordering = ['-created_at']
-    filterset_fields = ['is_banned']
+    filterset_class = StudentUserFilter
     
     def get_queryset(self):
         return User.objects.filter(user_type='student', is_staff=False, is_superuser=False).prefetch_related('devices').order_by('-created_at')
@@ -1425,10 +1441,10 @@ class DeletedUserArchiveListView(generics.ListAPIView):
     serializer_class = DeletedUserArchiveSerializer
     permission_classes = [IsAdminUser]
     filter_backends = [SearchFilter, OrderingFilter, DjangoFilterBackend]
-    ordering_fields = ['id', 'deleted_at', 'original_created_at', 'username', 'name']
+    ordering_fields = ['id', 'deleted_at', 'original_created_at', 'username', 'name', 'gender']
     ordering = ['-deleted_at']
     search_fields = ['username', 'name', 'email']
-    filterset_fields = ['user_type', 'was_banned']
+    filterset_fields = ['user_type', 'gender', 'was_banned']
     
     
 class DeletedUserArchiveDetailView(generics.RetrieveAPIView):
@@ -1500,6 +1516,7 @@ class RestoreUserView(APIView):
                 name=archive.name,
                 email=archive.email,
                 user_type=archive.user_type,
+                gender=archive.gender,
                 parent_phone=archive.parent_phone,
                 government=archive.government,
                 max_allowed_devices=archive.max_allowed_devices,

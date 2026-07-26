@@ -132,6 +132,7 @@ class Command(BaseCommand):
                     'email': student_data.get('email', ''),
                     'name': student_data.get('name', f'Student {i+1}'),
                     'user_type': 'student',
+                    'gender': student_data.get('gender', User.Gender.NOT_DEFINED),
                     'parent_phone': student_data.get('parent_phone', ''),
                     'government': student_data.get('government', ''),
                 }

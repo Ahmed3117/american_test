@@ -6,6 +6,7 @@ from django.db import transaction
 from django.db.models import Count, OuterRef, Q, Subquery, Sum
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
+from django_filters import rest_framework as filters
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework import generics, status
 from rest_framework.filters import OrderingFilter, SearchFilter
@@ -62,6 +63,44 @@ from dashboard.serializers.exam.exam import (
 
 
 STAFF_PERMISSIONS = [IsAuthenticated, IsAdminUser]
+
+
+class EssaySubmissionFilter(filters.FilterSet):
+    gender = filters.BaseInFilter(field_name="student__user__gender", lookup_expr="in")
+
+    class Meta:
+        model = EssaySubmission
+        fields = ["exam", "student", "student__user", "question", "result_trial", "is_scored"]
+
+
+class ResultFilter(filters.FilterSet):
+    gender = filters.BaseInFilter(field_name="student__user__gender", lookup_expr="in")
+
+    class Meta:
+        model = Result
+        fields = {
+            "student": ["exact"],
+            "exam": ["exact"],
+            "exam__course": ["exact"],
+            "exam__unit": ["exact"],
+            "exam__related_to": ["exact"],
+        }
+
+
+class ResultTrialFilter(filters.FilterSet):
+    gender = filters.BaseInFilter(field_name="result__student__user__gender", lookup_expr="in")
+
+    class Meta:
+        model = ResultTrial
+        fields = {
+            "result": ["exact"],
+            "result__student": ["exact"],
+            "result__exam": ["exact"],
+            "result__exam__course": ["exact"],
+            "result__exam__unit": ["exact"],
+            "submit_type": ["exact"],
+            "trial": ["exact"],
+        }
 
 
 def _bool(value):
@@ -245,6 +284,7 @@ def _result_detail_payload(result, trial):
         "trial_number": trial.trial if trial else None,
         "student_id": result.student_id,
         "student_name": result.student.name,
+        "student_gender": result.student.user.gender,
         "exam_id": result.exam_id,
         "exam_title": result.exam.title,
         "exam_description": result.exam.description,
@@ -560,7 +600,7 @@ class EssaySubmissionListView(generics.ListAPIView):
     permission_classes = STAFF_PERMISSIONS
     serializer_class = EssaySubmissionSerializer
     filter_backends = [DjangoFilterBackend, SearchFilter]
-    filterset_fields = ["exam", "student", "student__user", "question", "result_trial", "is_scored"]
+    filterset_class = EssaySubmissionFilter
     search_fields = ["student__name", "exam__title"]
 
 
@@ -871,7 +911,7 @@ class ResultListView(generics.ListAPIView):
     pagination_class = CustomPageNumberPagination
     permission_classes = STAFF_PERMISSIONS
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = {"student": ["exact"], "exam": ["exact"], "exam__course": ["exact"], "exam__unit": ["exact"], "exam__related_to": ["exact"]}
+    filterset_class = ResultFilter
     search_fields = ["student__name", "student__user__username", "exam__title", "exam__description"]
     ordering_fields = ["added", "trial"]
     ordering = ["-added"]
@@ -913,7 +953,7 @@ class ExamResultDetailView(APIView):
     queryset = Result.objects.all()
 
     def get(self, request, result_id):
-        result = get_object_or_404(Result.objects.select_related("student", "exam").prefetch_related("trials"), pk=result_id)
+        result = get_object_or_404(Result.objects.select_related("student__user", "exam").prefetch_related("trials"), pk=result_id)
         return Response(_result_detail_payload(result, result.active_trial))
 
 
@@ -922,7 +962,7 @@ class ExamResultDetailForTrialView(APIView):
     queryset = Result.objects.all()
 
     def get(self, request, result_id, result_trial_id):
-        result = get_object_or_404(Result.objects.select_related("student", "exam").prefetch_related("trials"), pk=result_id)
+        result = get_object_or_404(Result.objects.select_related("student__user", "exam").prefetch_related("trials"), pk=result_id)
         trial = get_object_or_404(ResultTrial, pk=result_trial_id, result=result)
         data = _result_detail_payload(result, trial)
         data["selected_trial_id"] = trial.id
@@ -933,7 +973,7 @@ class AllTrialsListView(generics.ListAPIView):
     permission_classes = STAFF_PERMISSIONS
     pagination_class = CustomPageNumberPagination
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = {"result__student": ["exact"], "result__exam": ["exact"], "result__exam__course": ["exact"], "result__exam__unit": ["exact"], "submit_type": ["exact"], "trial": ["exact"]}
+    filterset_class = ResultTrialFilter
     search_fields = ["result__student__name", "result__student__user__username", "result__exam__title"]
     ordering_fields = ["student_started_exam_at", "student_submitted_exam_at", "score", "exam_score", "trial"]
     ordering = ["-student_started_exam_at"]
@@ -970,6 +1010,9 @@ class StudentsTookExamAPIView(generics.ListAPIView):
         search = self.request.query_params.get("search")
         if search:
             queryset = queryset.filter(Q(name__icontains=search) | Q(code__icontains=search) | Q(parent_phone__icontains=search) | Q(user__username__icontains=search))
+        gender = self.request.query_params.get("gender")
+        if gender:
+            queryset = queryset.filter(user__gender__in=[value.strip() for value in gender.split(",") if value.strip()])
         return queryset
 
     def get_serializer_context(self):
@@ -990,6 +1033,9 @@ class StudentsDidNotTakeExamAPIView(generics.ListAPIView):
         search = self.request.query_params.get("search")
         if search:
             queryset = queryset.filter(Q(name__icontains=search) | Q(code__icontains=search) | Q(parent_phone__icontains=search) | Q(user__username__icontains=search))
+        gender = self.request.query_params.get("gender")
+        if gender:
+            queryset = queryset.filter(user__gender__in=[value.strip() for value in gender.split(",") if value.strip()])
         return queryset.annotate(
             course_subscribed_at=Subquery(
                 CourseSubscription.objects.filter(student=OuterRef("pk"), course_id=related_course_id, active=True).order_by("-created_at").values("created_at")[:1]
@@ -1173,11 +1219,11 @@ class AdminQuestionBankBulkCreateView(APIView):
 
 
 class ResultTrialListCreateView(generics.ListCreateAPIView):
-    queryset = ResultTrial.objects.select_related("result", "result__student", "result__exam")
+    queryset = ResultTrial.objects.select_related("result", "result__student__user", "result__exam")
     serializer_class = ResultTrialSerializer
     permission_classes = STAFF_PERMISSIONS
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = {"result": ["exact"], "result__student": ["exact"], "result__exam": ["exact"], "trial": ["exact"], "submit_type": ["exact"]}
+    filterset_class = ResultTrialFilter
     search_fields = ["result__student__name", "result__student__user__username", "result__exam__title"]
     ordering_fields = ["trial", "score", "exam_score", "student_started_exam_at", "student_submitted_exam_at"]
     ordering = ["-student_started_exam_at"]

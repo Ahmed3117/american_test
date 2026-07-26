@@ -235,12 +235,14 @@ class YearSerializer(serializers.ModelSerializer):
 
 class EssaySubmissionSerializer(serializers.ModelSerializer):
     answer_file_url = serializers.SerializerMethodField()
+    student_gender = serializers.CharField(source="student.user.gender", read_only=True)
 
     class Meta:
         model = EssaySubmission
         fields = [
             "id",
             "student",
+            "student_gender",
             "exam",
             "question",
             "answer_text",
@@ -317,6 +319,7 @@ class ResultSerializer(serializers.ModelSerializer):
     student_id = serializers.IntegerField()
     student_name = serializers.SerializerMethodField()
     student_phone = serializers.SerializerMethodField()
+    student_gender = serializers.SerializerMethodField()
     parent_phone = serializers.SerializerMethodField()
     student_started_exam_at = serializers.SerializerMethodField()
     student_submitted_exam_at = serializers.SerializerMethodField()
@@ -338,6 +341,7 @@ class ResultSerializer(serializers.ModelSerializer):
             "student_id",
             "student_name",
             "student_phone",
+            "student_gender",
             "parent_phone",
             "student_started_exam_at",
             "student_submitted_exam_at",
@@ -375,6 +379,9 @@ class ResultSerializer(serializers.ModelSerializer):
 
     def get_student_phone(self, obj):
         return getattr(getattr(obj.student, "user", None), "username", getattr(obj, "student_phone", ""))
+
+    def get_student_gender(self, obj):
+        return getattr(getattr(obj.student, "user", None), "gender", "not_defined")
 
     def get_parent_phone(self, obj):
         return getattr(obj.student, "parent_phone", getattr(obj, "parent_phone", ""))
@@ -497,6 +504,7 @@ class FlattenedStudentResultSerializer(serializers.ModelSerializer):
     student_name = serializers.CharField(source="name")
     student_parent_phone = serializers.CharField(source="parent_phone", allow_null=True)
     student_code = serializers.CharField(source="code", allow_null=True)
+    student_gender = serializers.CharField(source="user.gender")
     exam_id = serializers.SerializerMethodField()
     exam_title = serializers.SerializerMethodField()
     examscore = serializers.SerializerMethodField()
@@ -514,6 +522,7 @@ class FlattenedStudentResultSerializer(serializers.ModelSerializer):
             "student_name",
             "student_parent_phone",
             "student_code",
+            "student_gender",
             "exam_id",
             "exam_title",
             "examscore",
@@ -567,19 +576,21 @@ class StudentDidNotTakeExamSerializer(serializers.ModelSerializer):
     student_user__username = serializers.CharField(source="user.username")
     student_name = serializers.CharField(source="name")
     student_parent_phone = serializers.CharField(source="parent_phone", allow_null=True)
+    student_gender = serializers.CharField(source="user.gender")
     course_subscribed_at = serializers.DateTimeField(read_only=True, allow_null=True)
 
     class Meta:
         model = Student
-        fields = ["id", "student_user__username", "student_name", "student_parent_phone", "code", "course_subscribed_at"]
+        fields = ["id", "student_user__username", "student_name", "student_parent_phone", "student_gender", "code", "course_subscribed_at"]
 
 
 class CombinedStudentResultSerializer(serializers.ModelSerializer):
     result = BriefedResultSerializer(source="result_set", many=True, read_only=True)
+    gender = serializers.CharField(source="user.gender", read_only=True)
 
     class Meta:
         model = Student
-        fields = ["id", "name", "parent_phone", "code", "result"]
+        fields = ["id", "name", "gender", "parent_phone", "code", "result"]
 
 
 class CopyExamSerializer(serializers.Serializer):

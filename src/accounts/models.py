@@ -40,12 +40,28 @@ USER_TYPE_CHOICES = [
     ]
 
 
+class GenderChoices(models.TextChoices):
+    MALE = 'male', 'Male'
+    FEMALE = 'female', 'Female'
+    NOT_DEFINED = 'not_defined', 'Not Defined'
+
+
+GENDER_CHOICES = GenderChoices.choices
+
+
 class User(AbstractUser):
+    Gender = GenderChoices
+
     name = models.CharField(max_length=100)
     otp = models.CharField(max_length=6, null=True, blank=True)
     otp_created_at = models.DateTimeField(null=True, blank=True)
     email = models.EmailField(blank=True, null=True, max_length=254)
     user_type = models.CharField(max_length=20, choices=USER_TYPE_CHOICES)
+    gender = models.CharField(
+        max_length=20,
+        choices=GENDER_CHOICES,
+        default=GenderChoices.NOT_DEFINED,
+    )
     parent_phone = models.CharField(max_length=20, null=True, blank=True, help_text="Only applicable for students")
     government = models.CharField(choices=GOVERNMENT_CHOICES, max_length=2, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True,null=True, blank=True)
@@ -270,6 +286,11 @@ class DeletedUserArchive(models.Model):
     name = models.CharField(max_length=100)
     email = models.EmailField(blank=True, null=True)
     user_type = models.CharField(max_length=20, choices=USER_TYPE_CHOICES)
+    gender = models.CharField(
+        max_length=20,
+        choices=GENDER_CHOICES,
+        default=GenderChoices.NOT_DEFINED,
+    )
     parent_phone = models.CharField(max_length=20, null=True, blank=True)
     government = models.CharField(choices=GOVERNMENT_CHOICES, max_length=2, null=True, blank=True)
     max_allowed_devices = models.PositiveIntegerField(default=2)
