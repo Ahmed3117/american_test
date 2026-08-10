@@ -75,6 +75,14 @@ class EssaySubmissionFilter(filters.FilterSet):
 
 class ResultFilter(filters.FilterSet):
     gender = filters.BaseInFilter(field_name="student__user__gender", lookup_expr="in")
+    submitted_by_unsubscribed_user = filters.BooleanFilter(
+        method="filter_submitted_by_unsubscribed_user"
+    )
+
+    def filter_submitted_by_unsubscribed_user(self, queryset, name, value):
+        if value:
+            return queryset.filter(trials__submitted_by_unsubscribed_user=True).distinct()
+        return queryset.exclude(trials__submitted_by_unsubscribed_user=True).distinct()
 
     class Meta:
         model = Result
@@ -100,6 +108,7 @@ class ResultTrialFilter(filters.FilterSet):
             "result__exam__unit": ["exact"],
             "submit_type": ["exact"],
             "trial": ["exact"],
+            "submitted_by_unsubscribed_user": ["exact"],
         }
 
 
@@ -291,6 +300,8 @@ def _result_detail_payload(result, trial):
         "exam_score": trial.exam_score if trial else 0,
         "student_score": trial.score if trial else 0,
         "is_succeeded": is_succeeded,
+        "has_unsubscribed_submission": result.has_unsubscribed_submission,
+        "submitted_by_unsubscribed_user": trial.submitted_by_unsubscribed_user if trial else False,
         "student_trials": result.trial,
         "is_trials_finished": result.is_trials_finished,
         "number_of_essay": essay_submissions.count(),
@@ -310,6 +321,7 @@ def _result_detail_payload(result, trial):
                 "student_started_exam_at": item.student_started_exam_at,
                 "student_submitted_exam_at": item.student_submitted_exam_at,
                 "submit_type": item.submit_type,
+                "submitted_by_unsubscribed_user": item.submitted_by_unsubscribed_user,
                 "trial_id": item.id,
                 "is_active": trial and item.id == trial.id,
             }
@@ -326,7 +338,7 @@ class ExamListCreateView(generics.ListCreateAPIView):
     serializer_class = ExamSerializer
     permission_classes = STAFF_PERMISSIONS
     filter_backends = [DjangoFilterBackend, OrderingFilter, SearchFilter]
-    filterset_fields = ["related_to", "is_active", "course", "unit", "type", "created", "start", "end", "allow_show_results_at"]
+    filterset_fields = ["related_to", "is_active", "allow_unsubscribed_access", "course", "unit", "type", "created", "start", "end", "allow_show_results_at"]
     search_fields = ["title", "description", "course__name", "unit__name"]
     ordering_fields = ["order", "start", "end", "created"]
 
@@ -993,7 +1005,7 @@ class ResultTrialsView(generics.ListAPIView):
     permission_classes = STAFF_PERMISSIONS
     serializer_class = ResultTrialSerializer
     filter_backends = [DjangoFilterBackend]
-    filterset_fields = ["submit_type"]
+    filterset_fields = ["submit_type", "submitted_by_unsubscribed_user"]
 
     def get_queryset(self):
         result = get_object_or_404(Result, id=self.kwargs["result_id"])
@@ -1028,7 +1040,13 @@ class StudentsDidNotTakeExamAPIView(generics.ListAPIView):
     def get_queryset(self):
         exam = get_object_or_404(Exam, id=self.kwargs["exam_id"])
         related_course_id = exam.get_related_course()
-        subscribed = Student.objects.filter(course_subscriptions__course_id=related_course_id, course_subscriptions__active=True).distinct()
+        if exam.allow_unsubscribed_access:
+            subscribed = Student.objects.all()
+        else:
+            subscribed = Student.objects.filter(
+                course_subscriptions__course_id=related_course_id,
+                course_subscriptions__active=True,
+            ).distinct()
         queryset = subscribed.exclude(result__exam=exam)
         search = self.request.query_params.get("search")
         if search:
@@ -1068,7 +1086,9 @@ class ExamsNotTakenByStudentAPIView(generics.ListAPIView):
     def get_queryset(self):
         student = get_object_or_404(Student, id=self.kwargs["student_id"])
         course_ids = CourseSubscription.objects.filter(student=student, active=True).values_list("course_id", flat=True)
-        queryset = Exam.objects.filter(course_id__in=course_ids).exclude(results__student=student).select_related("course", "unit").distinct()
+        queryset = Exam.objects.filter(
+            Q(course_id__in=course_ids) | Q(allow_unsubscribed_access=True)
+        ).exclude(results__student=student).select_related("course", "unit").distinct()
         search = self.request.query_params.get("search")
         if search:
             queryset = queryset.filter(Q(title__icontains=search) | Q(description__icontains=search))
@@ -1103,6 +1123,7 @@ class CopyExamView(APIView):
             show_answers_after_finish=original.show_answers_after_finish,
             order=original.order,
             is_active=original.is_active,
+            allow_unsubscribed_access=original.allow_unsubscribed_access,
             allow_show_results_at=original.allow_show_results_at,
             allow_show_answers_at=original.allow_show_answers_at,
             is_depends=original.is_depends,

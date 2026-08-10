@@ -63,6 +63,10 @@ class Exam(models.Model):
     show_answers_after_finish = models.BooleanField(default=False)
     order = models.PositiveIntegerField(default=0)
     is_active = models.BooleanField(default=True)
+    allow_unsubscribed_access = models.BooleanField(
+        default=False,
+        help_text="Allow students without an active subscription to take this exam.",
+    )
     allow_show_results_at = models.DateTimeField(default=timezone.now)
     allow_show_answers_at = models.DateTimeField(null=True, blank=True)
     is_depends = models.BooleanField(default=False)
@@ -443,6 +447,14 @@ class Result(models.Model):
         """
         best_trial = self.trials.order_by('-score').first()
         return best_trial.score if best_trial else 0.0
+
+    @property
+    def has_unsubscribed_submission(self):
+        """Whether any trial was submitted without course access at that time."""
+        return any(
+            trial.submitted_by_unsubscribed_user
+            for trial in self.trials.all()
+        )
         
     def __str__(self):
         return f"{self.student.name} - {self.exam.title} | Trial: {self.trial}"
@@ -464,6 +476,12 @@ class ResultTrial(models.Model):
     exam_model = models.ForeignKey(ExamModel, on_delete=models.SET_NULL, null=True, blank=True)
     student_started_exam_at = models.DateTimeField()
     student_submitted_exam_at = models.DateTimeField(null=True, blank=True)
+    submitted_by_unsubscribed_user = models.BooleanField(
+        default=False,
+        db_index=True,
+        editable=False,
+        help_text="The student had no active course subscription when this trial was submitted.",
+    )
 
     submit_type = models.CharField(
         max_length=20,

@@ -11,10 +11,26 @@ class QuestionAdmin(admin.ModelAdmin):
     filter_horizontal = ('similar_questions', 'years')
     search_fields = ('text', 'answers__text')
 
-admin.site.register(Exam)
 admin.site.register(QuestionCategory)
 admin.site.register(Question, QuestionAdmin)
 admin.site.register(Answer)
+
+
+@admin.register(Exam)
+class ExamAdmin(admin.ModelAdmin):
+    list_display = (
+        'id',
+        'title',
+        'course',
+        'unit',
+        'is_active',
+        'allow_unsubscribed_access',
+        'start',
+        'end',
+    )
+    list_editable = ('is_active', 'allow_unsubscribed_access')
+    list_filter = ('allow_unsubscribed_access', 'is_active', 'related_to', 'type', 'course', 'unit')
+    search_fields = ('title', 'description', 'course__name', 'unit__name')
 
 
 @admin.register(Year)
@@ -117,6 +133,7 @@ class ResultAdmin(admin.ModelAdmin):
         'is_succeeded',         # Property from the Result model
         'is_trials_finished',   # Property from the Result model
         'has_unsubmitted_trial',# Property from the Result model
+        'has_unsubscribed_submission',
     )
     list_filter = (
         'exam',
@@ -124,6 +141,7 @@ class ResultAdmin(admin.ModelAdmin):
         'trial',
         'exam_model',
         'added', # Filter by date added
+        'trials__submitted_by_unsubscribed_user',
     )
     search_fields = (
         'student__user__username',
@@ -150,12 +168,14 @@ class ResultTrialAdmin(admin.ModelAdmin):
         'student_started_exam_at',
         'student_submitted_exam_at',
         'submit_type',
+        'submitted_by_unsubscribed_user',
     )
     list_filter = (
         'result__exam', # Filter by the exam associated with the parent result
         'result__student', # Filter by the student associated with the parent result
         'trial',
         'submit_type',
+        'submitted_by_unsubscribed_user',
         'exam_model',
         'student_started_exam_at', # Filter by start date
         'student_submitted_exam_at', # Filter by submission date

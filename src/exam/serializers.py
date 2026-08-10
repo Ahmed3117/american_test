@@ -29,6 +29,7 @@ class ExamSerializer(serializers.ModelSerializer):
             'related_name',
             'order',
             'is_active',
+            'allow_unsubscribed_access',
             'show_answers_after_finish',
             'is_depends',
             'number_of_questions',
@@ -161,6 +162,8 @@ class StudentExamResultSerializer(serializers.ModelSerializer):
     student_submitted_exam_at = serializers.SerializerMethodField()
     # submit_type = serializers.SerializerMethodField()  # Commented out
     last_trials = serializers.SerializerMethodField()
+    has_unsubscribed_submission = serializers.BooleanField(read_only=True)
+    submitted_by_unsubscribed_user = serializers.SerializerMethodField()
 
     class Meta:
         model = Result
@@ -195,6 +198,8 @@ class StudentExamResultSerializer(serializers.ModelSerializer):
             # 'jwt_token',  # Commented out
             'student_started_exam_at',
             'student_submitted_exam_at',
+            'has_unsubscribed_submission',
+            'submitted_by_unsubscribed_user',
             # 'submit_type',  # Commented out
             'last_trials'
         ]
@@ -227,6 +232,7 @@ class StudentExamResultSerializer(serializers.ModelSerializer):
             'exam_score': trial.exam_score,
             'started_at': trial.student_started_exam_at,
             'submitted_at': trial.student_submitted_exam_at,
+            'submitted_by_unsubscribed_user': trial.submitted_by_unsubscribed_user,
             # 'submit_type': trial.submit_type,  # Commented out
             'is_passed': trial.score >= (obj.exam.passing_percent / 100) * trial.exam_score
         } for trial in last_trials]
@@ -277,6 +283,10 @@ class StudentExamResultSerializer(serializers.ModelSerializer):
     def get_student_submitted_exam_at(self, obj):
         active_trial = self._get_active_trial(obj)
         return active_trial.student_submitted_exam_at if active_trial else None
+
+    def get_submitted_by_unsubscribed_user(self, obj):
+        active_trial = self._get_active_trial(obj)
+        return active_trial.submitted_by_unsubscribed_user if active_trial else False
 
     # def get_submit_type(self, obj):  # Commented out
     #     active_trial = self._get_active_trial(obj)

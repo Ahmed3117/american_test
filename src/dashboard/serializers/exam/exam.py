@@ -156,6 +156,7 @@ class ExamSerializer(serializers.ModelSerializer):
             "show_answers_after_finish",
             "order",
             "is_active",
+            "allow_unsubscribed_access",
             "start",
             "end",
             "allow_show_results_at",
@@ -301,8 +302,9 @@ class ResultTrialSerializer(serializers.ModelSerializer):
             "submit_type",
             "student_started_exam_at",
             "student_submitted_exam_at",
+            "submitted_by_unsubscribed_user",
         ]
-        read_only_fields = ["id"]
+        read_only_fields = ["id", "submitted_by_unsubscribed_user"]
 
 
 class ResultSerializer(serializers.ModelSerializer):
@@ -324,6 +326,8 @@ class ResultSerializer(serializers.ModelSerializer):
     student_started_exam_at = serializers.SerializerMethodField()
     student_submitted_exam_at = serializers.SerializerMethodField()
     submit_type = serializers.SerializerMethodField()
+    has_unsubscribed_submission = serializers.BooleanField(read_only=True)
+    submitted_by_unsubscribed_user = serializers.SerializerMethodField()
 
     class Meta:
         model = Result
@@ -346,6 +350,8 @@ class ResultSerializer(serializers.ModelSerializer):
             "student_started_exam_at",
             "student_submitted_exam_at",
             "submit_type",
+            "has_unsubscribed_submission",
+            "submitted_by_unsubscribed_user",
         ]
 
     def _active_trial(self, obj):
@@ -397,6 +403,10 @@ class ResultSerializer(serializers.ModelSerializer):
     def get_submit_type(self, obj):
         trial = self._active_trial(obj)
         return getattr(obj, "submit_type", None) if hasattr(obj, "submit_type") else (trial.submit_type if trial else None)
+
+    def get_submitted_by_unsubscribed_user(self, obj):
+        trial = self._active_trial(obj)
+        return trial.submitted_by_unsubscribed_user if trial else False
 
 
 class BriefedResultSerializer(serializers.ModelSerializer):

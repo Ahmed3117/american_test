@@ -75,6 +75,7 @@ old_*/
 # JSON and Markdown files
 **/*.json
 **/*.md
+!src/docs/UNSUBSCRIBED_EXAM_API.md
 
 # Migration files
 **/migrations/

@@ -34,6 +34,10 @@ from subscription.models import CourseSubscription
 from subscription.access import student_has_course_access
 
 
+def _student_has_exam_access(student, exam):
+    return exam.allow_unsubscribed_access or student_has_course_access(student, exam.course)
+
+
 def _question_explanation_fields(question, prefix="question_explanation"):
     if not question:
         return {
@@ -54,6 +58,12 @@ class CheckExamStartAbility(APIView):
     def get(self, request, exam_id):
         student = request.user.student
         exam = get_object_or_404(Exam, pk=exam_id)
+
+        if not _student_has_exam_access(student, exam):
+            return Response(
+                {"error": "You do not have access permissions"},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
 
         exam_status = exam.status()
         if exam_status != "active":
@@ -147,7 +157,7 @@ class StartExam(APIView):
         exam = get_object_or_404(Exam, pk=exam_id)
         course = get_object_or_404(Course, id=exam.get_related_course())
 
-        if not self._has_active_subscription(student, course):
+        if not exam.allow_unsubscribed_access and not self._has_active_subscription(student, course):
             return Response(
                 {"error": "You do not have access permissions"},
                 status=status.HTTP_401_UNAUTHORIZED,
@@ -448,6 +458,10 @@ class SubmitExam(APIView):
             result_trial.exam_score = exam_score
             result_trial.student_submitted_exam_at = timezone.now()
             result_trial.submit_type = submit_type
+            result_trial.submitted_by_unsubscribed_user = not student_has_course_access(
+                student,
+                result.exam.course,
+            )
             result_trial.save()
 
             result.score = total_score
