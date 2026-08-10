@@ -13,7 +13,7 @@ from django.db.models.functions import Coalesce
 from django.db import transaction
 from core.permissions import HasValidAPIKey
 from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework.filters import SearchFilter
+from rest_framework.filters import OrderingFilter, SearchFilter
 from django.db.models import Prefetch, prefetch_related_objects
 import logging
 # custom filters
@@ -27,7 +27,7 @@ except ImportError:
             return inner
         return decorator(func) if func else decorator
 # Models
-from .serializers import QuestionSerializerWithCorrectAnswer, QuestionSerializerWithoutCorrectAnswer, StudentBankSerializer, StudentExamResultSerializer, AdminQuestionBankSerializer, StudentCreatedExamSerializer
+from .serializers import ExamSerializer, QuestionSerializerWithCorrectAnswer, QuestionSerializerWithoutCorrectAnswer, StudentBankSerializer, StudentExamResultSerializer, AdminQuestionBankSerializer, StudentCreatedExamSerializer
 from .models import AddReasonChoices, Answer, EssaySubmission, Exam, ExamModel, ExamModelQuestion, ExamQuestion, ExamType, Question, QuestionType, Result, ResultTrial, StudentBank, Submission, TempExam, TempExamAllowedTimes, AdminQuestionBank, StudentCreatedExam
 from course.models import Course, Unit
 from subscription.models import CourseSubscription
@@ -50,6 +50,39 @@ def _question_explanation_fields(question, prefix="question_explanation"):
         f"{prefix}_video_url": question.explanation_video_url,
         f"{prefix}_recorded_audio": question.explanation_recorded_audio.url if question.explanation_recorded_audio else None,
     }
+
+
+class OpenExamListView(generics.ListAPIView):
+    """List active exam records that do not require a course subscription."""
+
+    serializer_class = ExamSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_fields = ["course", "unit", "related_to", "type", "is_depends"]
+    search_fields = ["title", "description", "course__name", "unit__name"]
+    ordering_fields = ["order", "start", "end", "created", "title"]
+    ordering = ["order", "created"]
+
+    def get_queryset(self):
+        queryset = (
+            Exam.objects.filter(
+                is_active=True,
+                allow_unsubscribed_access=True,
+            )
+            .select_related("course", "unit")
+            .prefetch_related("exam_questions")
+        )
+
+        status_filter = self.request.query_params.get("status")
+        now = timezone.now()
+        if status_filter == "soon":
+            queryset = queryset.filter(start__gt=now)
+        elif status_filter == "active":
+            queryset = queryset.filter(start__lte=now, end__gte=now)
+        elif status_filter == "finished":
+            queryset = queryset.filter(end__lt=now)
+
+        return queryset
 
 
 class CheckExamStartAbility(APIView):

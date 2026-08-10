@@ -4,6 +4,7 @@ from . import views
 app_name = 'exam'
 
 urlpatterns = [
+    path('open/', views.OpenExamListView.as_view(), name='open-exam-list'),
     path('<int:exam_id>/check_my_ability_to_start/', views.CheckExamStartAbility.as_view(), name='check-exam-start-ability'),
     path('<int:exam_id>/start/', views.StartExam.as_view(), name='start-exam'),
     path('<int:exam_id>/submit/', views.SubmitExam.as_view(), name='submit-exam'),
