@@ -257,6 +257,26 @@ class Question(models.Model):
     def __str__(self):
         return str(self.id) + " | " + str(self.question_type) + " | " + self.text
 
+class QuestionImage(models.Model):
+    """Multiple images per question.
+
+    Legacy single-image data lives on Question.image until it is fully
+    migrated into rows here (see the Django admin action
+    "Move legacy image to images model"), after which Question.image
+    will be removed.
+    """
+    question = models.ForeignKey(Question, on_delete=models.CASCADE, related_name='images')
+    image = models.ImageField(upload_to='questions/')
+    order = models.PositiveIntegerField(default=0)
+    created = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['order', 'id']
+
+    def __str__(self):
+        return f"Q: {self.question_id} | {self.image.name}"
+
+
 class Answer(models.Model):
     text = models.TextField()
     image = models.ImageField(upload_to='answers/', null=True, blank=True)

@@ -1,7 +1,7 @@
 from rest_framework import serializers
 
 from course.models import Course, Unit
-from .models import Answer, Exam, ExamType, Question, Result, StudentBank, TempExam, AdminQuestionBank, StudentCreatedExam
+from .models import Answer, Exam, ExamType, Question, QuestionImage, Result, StudentBank, TempExam, AdminQuestionBank, StudentCreatedExam
 from student.models import Student,StudentFavorite
 from django.contrib.contenttypes.models import ContentType
 
@@ -105,13 +105,19 @@ class AnswerSerializer(serializers.ModelSerializer):
         model = Answer
         fields = ['id', 'text', 'image']
 
+class QuestionImageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = QuestionImage
+        fields = ['id', 'image', 'order']
+
 class QuestionSerializerWithoutCorrectAnswer(serializers.ModelSerializer):
     answers = AnswerSerializer(many=True, required=False)
+    images = QuestionImageSerializer(many=True, read_only=True)
     years = serializers.SerializerMethodField()
 
     class Meta:
         model = Question
-        fields = ['id', 'text', 'explanation_text', 'explanation_video_url', 'explanation_recorded_audio', 'image', 'points', 'difficulty', 'category', 'course', 'unit', 'is_active', 'answers', 'question_type', 'years']
+        fields = ['id', 'text', 'explanation_text', 'explanation_video_url', 'explanation_recorded_audio', 'images', 'points', 'difficulty', 'category', 'course', 'unit', 'is_active', 'answers', 'question_type', 'years']
 
     def get_years(self, obj):
         return [{"id": y.id, "value": y.value} for y in obj.years.all()]
@@ -123,11 +129,12 @@ class AnswerSerializerWithCorrectAnswer(serializers.ModelSerializer):
 
 class QuestionSerializerWithCorrectAnswer(serializers.ModelSerializer):
     answers = AnswerSerializerWithCorrectAnswer(many=True, required=False)
+    images = QuestionImageSerializer(many=True, read_only=True)
     years = serializers.SerializerMethodField()
 
     class Meta:
         model = Question
-        fields = ['id', 'text', 'explanation_text', 'explanation_video_url', 'explanation_recorded_audio', 'image', 'points', 'difficulty', 'category', 'course', 'unit', 'is_active', 'answers', 'question_type', 'years']
+        fields = ['id', 'text', 'explanation_text', 'explanation_video_url', 'explanation_recorded_audio', 'images', 'points', 'difficulty', 'category', 'course', 'unit', 'is_active', 'answers', 'question_type', 'years']
 
     def get_years(self, obj):
         return [{"id": y.id, "value": y.value} for y in obj.years.all()]

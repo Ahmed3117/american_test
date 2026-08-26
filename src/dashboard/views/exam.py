@@ -3,7 +3,7 @@ import random
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
-from django.db.models import Count, OuterRef, Q, Subquery, Sum
+from django.db.models import Count, Max, OuterRef, Q, Subquery, Sum
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django_filters import rest_framework as filters
@@ -28,6 +28,7 @@ from exam.models import (
     ExamType,
     Question,
     QuestionCategory,
+    QuestionImage,
     QuestionType,
     RandomExamBank,
     Result,
@@ -152,6 +153,46 @@ def _has_indexed_answers(data):
     return any(str(key).startswith("answers[") and str(key).endswith("][text]") for key in data.keys())
 
 
+def _question_image_files_from_request(request, prefix="images"):
+    """Collect uploaded question images.
+
+    Accepts both indexed form-data keys (`images[0]`, `images[1]`, ...) and
+    repeated plain `images` fields. Returns a list of UploadedFile objects.
+    """
+    files = []
+    index = 0
+    while f"{prefix}[{index}]" in request.FILES:
+        files.append(request.FILES[f"{prefix}[{index}]"])
+        index += 1
+    if not files:
+        files = request.FILES.getlist(prefix)
+    return files
+
+
+def _create_question_images(question, files):
+    """Persist uploaded image files as QuestionImage rows for the question."""
+    if not files:
+        return
+    start = question.images.aggregate(max=Max("order"))["max"] or 0
+    QuestionImage.objects.bulk_create(
+        [
+            QuestionImage(question=question, image=file, order=start + offset + 1)
+            for offset, file in enumerate(files)
+        ]
+    )
+
+
+
+def _remove_question_images(question, raw_ids):
+    """Delete QuestionImage rows by ids; accepts a list, JSON array or comma-separated string."""
+    try:
+        ids = _parse_year_id_list(raw_ids)
+    except ValueError as exc:
+        raise ValueError(f"Invalid remove_image_ids: {exc}") from exc
+    if ids:
+        question.images.filter(id__in=ids).delete()
+
+
 def _strip_parser_artifacts(data):
     cleaned = data.copy()
     cleaned.pop("answers", None)
@@ -236,7 +277,12 @@ def _serialize_trial_answer(submission):
         "question_category": question.category.title if question.category else None,
         "question_category_id": question.category_id,
         "question_text": question.text,
-        "question_image": question.image.url if question.image else None,
+        "question_image": (
+            question.images.first().image.url if question.images.first() else None
+        ),
+        "question_images": [
+            {"id": qi.id, "image": qi.image.url} for qi in question.images.all()
+        ],
         "question_comment": question.comment,
         "question_years": [
             {"id": y.id, "value": y.value} for y in question.years.all()
@@ -259,7 +305,12 @@ def _serialize_essay_submission(submission):
         "question_category": question.category.title if question.category else None,
         "question_category_id": question.category_id,
         "question_text": question.text,
-        "question_image": question.image.url if question.image else None,
+        "question_image": (
+            question.images.first().image.url if question.images.first() else None
+        ),
+        "question_images": [
+            {"id": qi.id, "image": qi.image.url} for qi in question.images.all()
+        ],
         "question_comment": question.comment,
         "question_years": [
             {"id": y.id, "value": y.value} for y in question.years.all()
@@ -408,7 +459,7 @@ class QuestionListCreateView(generics.ListCreateAPIView):
     queryset = (
         Question.objects
         .select_related("course", "unit", "category")
-        .prefetch_related("answers", "years")
+        .prefetch_related("answers", "years", "images")
         .order_by("-created", "-id")
     )
     permission_classes = STAFF_PERMISSIONS
@@ -441,13 +492,14 @@ class QuestionListCreateView(generics.ListCreateAPIView):
         if "answers" in request.data and not _has_indexed_answers(request.data):
             return super().create(request, *args, **kwargs)
         data = _strip_parser_artifacts(request.data)
-        if "image" in request.FILES:
-            data["image"] = request.FILES["image"]
         if "explanation_recorded_audio" in request.FILES:
             data["explanation_recorded_audio"] = request.FILES["explanation_recorded_audio"]
         serializer = self.get_serializer(data=data)
         serializer.is_valid(raise_exception=True)
         question = serializer.save()
+
+        # Multiple images (images[0], images[1], ... or repeated `images` files)
+        _create_question_images(question, _question_image_files_from_request(request))
 
         index = 0
         while f"answers[{index}][text]" in request.data:
@@ -461,7 +513,7 @@ class QuestionListCreateView(generics.ListCreateAPIView):
 
 
 class QuestionRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
-    queryset = Question.objects.select_related("course", "unit", "category").prefetch_related("answers")
+    queryset = Question.objects.select_related("course", "unit", "category").prefetch_related("answers", "images")
     serializer_class = QuestionSerializer
     permission_classes = STAFF_PERMISSIONS
     parser_classes = (MultiPartParser, FormParser, JSONParser)
@@ -473,14 +525,20 @@ class QuestionRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
             return super().patch(request, *args, **kwargs)
 
         data = _strip_parser_artifacts(request.data)
-        if "image" in request.FILES:
-            data["image"] = request.FILES["image"]
         if "explanation_recorded_audio" in request.FILES:
             data["explanation_recorded_audio"] = request.FILES["explanation_recorded_audio"]
 
         serializer = self.get_serializer(instance, data=data, partial=True)
         serializer.is_valid(raise_exception=True)
         serializer.save()
+
+        # Multiple images: append new uploads and/or remove existing rows by id.
+        _create_question_images(instance, _question_image_files_from_request(request))
+        if request.data.get("remove_image_ids") not in (None, ""):
+            try:
+                _remove_question_images(instance, request.data.get("remove_image_ids"))
+            except ValueError as exc:
+                return Response({"error": str(exc), "field": "remove_image_ids"}, status=status.HTTP_400_BAD_REQUEST)
 
         processed_ids = []
         index = 0
@@ -539,9 +597,6 @@ class BulkQuestionCreateView(generics.CreateAPIView):
                     ),
                     "explanation_video_url": request.data.get(f"questions[{index}][explanation_video_url]"),
                 }
-                image_key = f"questions[{index}][image]"
-                if image_key in request.FILES:
-                    data["image"] = request.FILES[image_key]
                 audio_key = f"questions[{index}][explanation_recorded_audio]"
                 if audio_key in request.FILES:
                     data["explanation_recorded_audio"] = request.FILES[audio_key]
@@ -550,6 +605,12 @@ class BulkQuestionCreateView(generics.CreateAPIView):
                 question = serializer.save()
                 if exam:
                     ExamQuestion.objects.get_or_create(exam=exam, question=question)
+
+                # Multiple images: questions[i][images][j] files (or repeated questions[i][images])
+                _create_question_images(
+                    question,
+                    _question_image_files_from_request(request, f"questions[{index}][images]"),
+                )
 
                 # Attach years (list of Year primary keys).
                 # Accepts JSON-array string "[1,4,2]", comma-separated "1,4,2",
@@ -768,8 +829,6 @@ class AddManualExamQuestionsView(APIView):
     def post(self, request, exam_id):
         exam = get_object_or_404(Exam, pk=exam_id)
         data = _strip_parser_artifacts(request.data)
-        if "image" in request.FILES:
-            data["image"] = request.FILES["image"]
         if "explanation_recorded_audio" in request.FILES:
             data["explanation_recorded_audio"] = request.FILES["explanation_recorded_audio"]
         if "years" in data and data["years"] not in (None, ""):

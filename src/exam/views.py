@@ -52,6 +52,25 @@ def _question_explanation_fields(question, prefix="question_explanation"):
     }
 
 
+def _question_images_payload(question):
+    """Serialize QuestionImage rows for manual payload building."""
+    if not question:
+        return []
+    return [
+        {"id": qi.id, "image": qi.image.url}
+        for qi in question.images.all()
+    ]
+
+
+def _legacy_question_image(question):
+    """Convenience single-image URL sourced from the new images model
+    (first row). The legacy Question.image column is no longer read."""
+    if not question:
+        return None
+    first = question.images.first()
+    return first.image.url if first else None
+
+
 class OpenExamListView(generics.ListAPIView):
     """List active exam records that do not require a course subscription."""
 
@@ -647,7 +666,8 @@ class GetMyExamResult(APIView):
                 "question_category": question.category.title if question and question.category else None,
                 "question_category_id": question.category.id if question and question.category else None,
                 "question_text": question.text if question else None,
-                "question_image": question.image.url if question and question.image else None,
+                "question_image": _legacy_question_image(question),
+                "question_images": _question_images_payload(question),
                 "question_comment": question.comment,
                 "question_years": [
                     {"id": y.id, "value": y.value} for y in question.years.all()
@@ -674,7 +694,8 @@ class GetMyExamResult(APIView):
                 "question_category": question.category.title if question and question.category else None,
                 "question_category_id": question.category.id if question and question.category else None,
                 "question_text": question.text if question else None,
-                "question_image": question.image.url if question and question.image else None,
+                "question_image": _legacy_question_image(question),
+                "question_images": _question_images_payload(question),
                 "question_comment": question.comment,
                 "question_years": [
                     {"id": y.id, "value": y.value} for y in question.years.all()
@@ -694,7 +715,8 @@ class GetMyExamResult(APIView):
             {
                 "question_id": question.id,
                 "question_text": question.text,
-                "question_image": question.image.url if question.image else None,
+                "question_image": _legacy_question_image(question),
+                "question_images": _question_images_payload(question),
                 "question_type": question.question_type,
                 "question_comment": question.comment,
                 "question_years": [
@@ -822,7 +844,8 @@ class GetMyExamResultForTrial(APIView):
                 "question_category": question.category.title if question and question.category else None,
                 "question_category_id": question.category.id if question and question.category else None,
                 "question_text": question.text if question else None,
-                "question_image": question.image.url if question and question.image else None,
+                "question_image": _legacy_question_image(question),
+                "question_images": _question_images_payload(question),
                 "question_comment": question.comment,
                 "question_years": [
                     {"id": y.id, "value": y.value} for y in question.years.all()
@@ -846,7 +869,8 @@ class GetMyExamResultForTrial(APIView):
                 "question_category": question.category.title if question and question.category else None,
                 "question_category_id": question.category.id if question and question.category else None,
                 "question_text": question.text if question else None,
-                "question_image": question.image.url if question and question.image else None,
+                "question_image": _legacy_question_image(question),
+                "question_images": _question_images_payload(question),
                 "question_comment": question.comment,
                 "question_years": [
                     {"id": y.id, "value": y.value} for y in question.years.all()
@@ -866,7 +890,8 @@ class GetMyExamResultForTrial(APIView):
             {
                 "question_id": question.id,
                 "question_text": question.text,
-                "question_image": question.image.url if question.image else None,
+                "question_image": _legacy_question_image(question),
+                "question_images": _question_images_payload(question),
                 "question_type": question.question_type,
                 "question_comment": question.comment,
                 "question_years": [

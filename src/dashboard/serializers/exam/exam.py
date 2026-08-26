@@ -11,6 +11,7 @@ from exam.models import (
     ExamQuestion,
     Question,
     QuestionCategory,
+    QuestionImage,
     RandomExamBank,
     RelatedToChoices,
     Result,
@@ -19,6 +20,12 @@ from exam.models import (
     Year,
 )
 from student.models import Student
+
+
+class QuestionImageSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = QuestionImage
+        fields = ["id", "image", "order"]
 
 
 class AnswerSerializer(serializers.ModelSerializer):
@@ -36,7 +43,7 @@ class AnswerSerializer(serializers.ModelSerializer):
 
 class QuestionSerializer(serializers.ModelSerializer):
     answers = AnswerSerializer(many=True, required=False)
-    image = serializers.ImageField(required=False, allow_null=True)
+    images = QuestionImageSerializer(many=True, read_only=True)
     years = serializers.PrimaryKeyRelatedField(
         many=True,
         queryset=Year.objects.all(),
@@ -51,7 +58,7 @@ class QuestionSerializer(serializers.ModelSerializer):
             "explanation_text",
             "explanation_video_url",
             "explanation_recorded_audio",
-            "image",
+            "images",
             "points",
             "difficulty",
             "category",
@@ -271,7 +278,15 @@ class EssaySubmissionSerializer(serializers.ModelSerializer):
         data["question_explanation_video_url"] = instance.question.explanation_video_url
         data["question_explanation_recorded_audio"] = instance.question.explanation_recorded_audio.url if instance.question.explanation_recorded_audio else None
         data["question_comment"] = instance.question.comment
-        data["question_image"] = instance.question.image.url if instance.question.image else None
+        data["question_image"] = (
+            instance.question.images.first().image.url
+            if instance.question.images.first()
+            else None
+        )
+        data["question_images"] = [
+            {"id": qi.id, "image": qi.image.url}
+            for qi in instance.question.images.all()
+        ]
         return data
 
 
