@@ -274,6 +274,7 @@ class EssaySubmissionSerializer(serializers.ModelSerializer):
         data["student"] = instance.student.name
         data["exam"] = instance.exam.title
         data["question"] = instance.question.text
+        data["question_points"] = instance.question.points
         data["question_explanation_text"] = instance.question.explanation_text
         data["question_explanation_video_url"] = instance.question.explanation_video_url
         data["question_explanation_recorded_audio"] = instance.question.explanation_recorded_audio.url if instance.question.explanation_recorded_audio else None
