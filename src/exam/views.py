@@ -62,9 +62,8 @@ def _question_images_payload(question):
     ]
 
 
-def _legacy_question_image(question):
-    """Convenience single-image URL sourced from the new images model
-    (first row). The legacy Question.image column is no longer read."""
+def _first_question_image_url(question):
+    """Convenience single-image URL = first row of the new images model."""
     if not question:
         return None
     first = question.images.first()
@@ -666,7 +665,7 @@ class GetMyExamResult(APIView):
                 "question_category": question.category.title if question and question.category else None,
                 "question_category_id": question.category.id if question and question.category else None,
                 "question_text": question.text if question else None,
-                "question_image": _legacy_question_image(question),
+                "question_image": _first_question_image_url(question),
                 "question_images": _question_images_payload(question),
                 "question_comment": question.comment,
                 "question_years": [
@@ -694,7 +693,7 @@ class GetMyExamResult(APIView):
                 "question_category": question.category.title if question and question.category else None,
                 "question_category_id": question.category.id if question and question.category else None,
                 "question_text": question.text if question else None,
-                "question_image": _legacy_question_image(question),
+                "question_image": _first_question_image_url(question),
                 "question_images": _question_images_payload(question),
                 "question_comment": question.comment,
                 "question_years": [
@@ -715,7 +714,7 @@ class GetMyExamResult(APIView):
             {
                 "question_id": question.id,
                 "question_text": question.text,
-                "question_image": _legacy_question_image(question),
+                "question_image": _first_question_image_url(question),
                 "question_images": _question_images_payload(question),
                 "question_type": question.question_type,
                 "question_comment": question.comment,
@@ -844,7 +843,7 @@ class GetMyExamResultForTrial(APIView):
                 "question_category": question.category.title if question and question.category else None,
                 "question_category_id": question.category.id if question and question.category else None,
                 "question_text": question.text if question else None,
-                "question_image": _legacy_question_image(question),
+                "question_image": _first_question_image_url(question),
                 "question_images": _question_images_payload(question),
                 "question_comment": question.comment,
                 "question_years": [
@@ -869,7 +868,7 @@ class GetMyExamResultForTrial(APIView):
                 "question_category": question.category.title if question and question.category else None,
                 "question_category_id": question.category.id if question and question.category else None,
                 "question_text": question.text if question else None,
-                "question_image": _legacy_question_image(question),
+                "question_image": _first_question_image_url(question),
                 "question_images": _question_images_payload(question),
                 "question_comment": question.comment,
                 "question_years": [
@@ -890,7 +889,7 @@ class GetMyExamResultForTrial(APIView):
             {
                 "question_id": question.id,
                 "question_text": question.text,
-                "question_image": _legacy_question_image(question),
+                "question_image": _first_question_image_url(question),
                 "question_images": _question_images_payload(question),
                 "question_type": question.question_type,
                 "question_comment": question.comment,
@@ -967,7 +966,7 @@ class StudentBankListView(generics.ListAPIView):
             # Question fields (minimal needed for serialization)
             'question__id', 'question__text', 'question__explanation_text',
             'question__explanation_video_url', 'question__explanation_recorded_audio', 'question__points',
-            'question__question_type', 'question__image',
+            'question__question_type',
             # Related fields for filtering
             'question__course__id', 'question__course__name',
             'question__unit__id', 'question__unit__name',

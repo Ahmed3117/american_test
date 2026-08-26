@@ -1,5 +1,4 @@
-from django.contrib import admin, messages
-from django.db import transaction
+from django.contrib import admin
 from django.db.models import Max
 
 from exam.models import StudentBank, TempExam, TempExamAllowedTimes, Answer, EssaySubmission, Exam, ExamQuestion, Question, QuestionCategory, QuestionImage, Result, ResultTrial, Submission, AdminQuestionBank, StudentCreatedExam, Year
@@ -13,33 +12,6 @@ class QuestionImageInline(admin.TabularInline):
     readonly_fields = ('created',)
 
 
-def _copy_question_image(question):
-    """Copy Question.image into a QuestionImage row (idempotent).
-
-    Returns (created_row_or_None, skipped_reason_or_None).
-    The legacy image field is intentionally kept untouched.
-    """
-    if not question.image:
-        return None, "no_legacy_image"
-    already = QuestionImage.objects.filter(
-        question=question, image=question.image.name
-    ).exists()
-    if already:
-        return None, "already_migrated"
-    next_order = (
-        QuestionImage.objects.filter(question=question).aggregate(
-            max=Max("order")
-        )["max"]
-        or 0
-    )
-    return (
-        QuestionImage.objects.create(
-            question=question, image=question.image.name, order=next_order + 1
-        ),
-        None,
-    )
-
-
 class QuestionAdmin(admin.ModelAdmin):
     list_display = ('id','text', 'points', 'difficulty', 'category', 'course', 'unit', 'is_active', 'images_count', 'created')
     list_editable = ('is_active',)
@@ -47,33 +19,10 @@ class QuestionAdmin(admin.ModelAdmin):
     filter_horizontal = ('similar_questions', 'years')
     search_fields = ('text', 'answers__text')
     inlines = (QuestionImageInline,)
-    actions = ('move_images_to_images_model',)
 
     @admin.display(description='Images')
     def images_count(self, obj):
         return obj.images.count()
-
-    @admin.action(description='Move legacy image value to images model (keeps the image field)')
-    def move_images_to_images_model(self, request, queryset):
-        created_rows = 0
-        already_migrated = 0
-        without_image = 0
-        with transaction.atomic():
-            for question in queryset.select_related(None).iterator():
-                if not question.image:
-                    without_image += 1
-                    continue
-                row, reason = _copy_question_image(question)
-                if row:
-                    created_rows += 1
-                elif reason == "already_migrated":
-                    already_migrated += 1
-        parts = [f"{created_rows} image(s) moved"]
-        if already_migrated:
-            parts.append(f"{already_migrated} already migrated (skipped)")
-        if without_image:
-            parts.append(f"{without_image} had no legacy image")
-        messages.success(request, ". ".join(parts) + " Legacy image field was kept unchanged.")
 
 admin.site.register(QuestionCategory)
 admin.site.register(Question, QuestionAdmin)

@@ -196,7 +196,6 @@ class Year(models.Model):
 
 class Question(models.Model):
     text = models.TextField()
-    image = models.ImageField(upload_to='questions/', null=True, blank=True)
     points = models.PositiveIntegerField(default=1)
     difficulty = models.CharField(max_length=6, choices=DifficultyLevel.choices, default=DifficultyLevel.EASY)
     category = models.ForeignKey(
@@ -260,10 +259,7 @@ class Question(models.Model):
 class QuestionImage(models.Model):
     """Multiple images per question.
 
-    Legacy single-image data lives on Question.image until it is fully
-    migrated into rows here (see the Django admin action
-    "Move legacy image to images model"), after which Question.image
-    will be removed.
+    Replaces the old single `Question.image` column, which has been removed.
     """
     question = models.ForeignKey(Question, on_delete=models.CASCADE, related_name='images')
     image = models.ImageField(upload_to='questions/')
