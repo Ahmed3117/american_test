@@ -748,13 +748,26 @@ class GetExamQuestions(APIView):
         return Response({"exam_id": exam.id, "exam_title": exam.title, "questions": ExamQuestionSerializer(exam_questions, many=True).data})
 
 
-class ExamQuestionListCreateView(APIView):
+class ExamQuestionListCreateView(generics.ListAPIView):
     permission_classes = STAFF_PERMISSIONS
+    serializer_class = ExamQuestionSerializer
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_fields = {
+        "question__category": ["exact"],
+        "question__course": ["exact"],
+        "question__unit": ["exact"],
+        "question__question_type": ["exact"],
+        "question__difficulty": ["exact"],
+        "question__is_active": ["exact"],
+        "is_active": ["exact"],
+    }
+    search_fields = ["question__text"]
+    ordering_fields = ["order", "id", "created", "question__points"]
+    ordering = ["order", "id"]
 
-    def get(self, request, exam_id):
-        exam = get_object_or_404(Exam, pk=exam_id)
-        serializer = ExamQuestionSerializer(exam.exam_questions.select_related("question").all(), many=True)
-        return Response(serializer.data)
+    def get_queryset(self):
+        exam = get_object_or_404(Exam, pk=self.kwargs["exam_id"])
+        return exam.exam_questions.select_related("question").all()
 
     def post(self, request, exam_id):
         exam = get_object_or_404(Exam, pk=exam_id)
