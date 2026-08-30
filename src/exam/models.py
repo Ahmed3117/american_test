@@ -218,7 +218,13 @@ class Question(models.Model):
         help_text="Questions that are similar to this question"
     )
     explanation_text = models.TextField(null=True, blank=True, help_text="Explanation text for the question")
-    explanation_video_url = models.URLField(max_length=500, null=True, blank=True, help_text="Explanation video URL for the question")
+    explanation_video_url = models.FileField(
+        upload_to='question_explanations/video/',
+        max_length=500,
+        null=True,
+        blank=True,
+        help_text="Uploaded explanation video stored using the configured media storage.",
+    )
     explanation_recorded_audio = models.FileField(upload_to='question_explanations/audio/', null=True, blank=True, help_text="Recorded audio explanation for the question")
     years = models.ManyToManyField(
         "Year",

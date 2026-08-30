@@ -3,7 +3,21 @@ import random
 
 from django.core.exceptions import ValidationError
 from django.db import transaction
-from django.db.models import Count, Max, OuterRef, Q, Subquery, Sum
+from django.db.models import (
+    BooleanField,
+    Case,
+    Count,
+    FloatField,
+    IntegerField,
+    Max,
+    OuterRef,
+    Q,
+    Subquery,
+    Sum,
+    Value,
+    When,
+)
+from django.db.models.functions import Coalesce
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django_filters import rest_framework as filters
@@ -37,6 +51,7 @@ from exam.models import (
     TempExamAllowedTimes,
     Year,
 )
+from exam.serializer_fields import stored_file_url
 from student.models import Student
 from subscription.models import CourseSubscription
 
@@ -59,6 +74,7 @@ from dashboard.serializers.exam.exam import (
     ResultTrialSerializer,
     StudentDidNotTakeExamSerializer,
     TempExamAllowedTimesSerializer,
+    TopStudentResultSerializer,
     YearSerializer,
 )
 
@@ -128,7 +144,7 @@ def _question_explanation_fields(question, prefix="question_explanation"):
         }
     return {
         f"{prefix}_text": question.explanation_text,
-        f"{prefix}_video_url": question.explanation_video_url,
+        f"{prefix}_video_url": stored_file_url(question.explanation_video_url),
         f"{prefix}_recorded_audio": question.explanation_recorded_audio.url if question.explanation_recorded_audio else None,
     }
 
@@ -492,6 +508,8 @@ class QuestionListCreateView(generics.ListCreateAPIView):
         if "answers" in request.data and not _has_indexed_answers(request.data):
             return super().create(request, *args, **kwargs)
         data = _strip_parser_artifacts(request.data)
+        if "explanation_video_url" in request.FILES:
+            data["explanation_video_url"] = request.FILES["explanation_video_url"]
         if "explanation_recorded_audio" in request.FILES:
             data["explanation_recorded_audio"] = request.FILES["explanation_recorded_audio"]
         serializer = self.get_serializer(data=data)
@@ -525,6 +543,8 @@ class QuestionRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
             return super().patch(request, *args, **kwargs)
 
         data = _strip_parser_artifacts(request.data)
+        if "explanation_video_url" in request.FILES:
+            data["explanation_video_url"] = request.FILES["explanation_video_url"]
         if "explanation_recorded_audio" in request.FILES:
             data["explanation_recorded_audio"] = request.FILES["explanation_recorded_audio"]
 
@@ -595,8 +615,14 @@ class BulkQuestionCreateView(generics.CreateAPIView):
                         f"questions[{index}][explanation_text]",
                         request.data.get(f"questions[{index}][explanation]"),
                     ),
-                    "explanation_video_url": request.data.get(f"questions[{index}][explanation_video_url]"),
                 }
+                video_key = f"questions[{index}][explanation_video_url]"
+                if video_key in request.FILES:
+                    data["explanation_video_url"] = request.FILES[video_key]
+                elif request.data.get(video_key) not in (None, ""):
+                    # Let the FileField return a clear validation error for
+                    # obsolete URL/text input instead of silently ignoring it.
+                    data["explanation_video_url"] = request.data.get(video_key)
                 audio_key = f"questions[{index}][explanation_recorded_audio]"
                 if audio_key in request.FILES:
                     data["explanation_recorded_audio"] = request.FILES[audio_key]
@@ -842,6 +868,8 @@ class AddManualExamQuestionsView(APIView):
     def post(self, request, exam_id):
         exam = get_object_or_404(Exam, pk=exam_id)
         data = _strip_parser_artifacts(request.data)
+        if "explanation_video_url" in request.FILES:
+            data["explanation_video_url"] = request.FILES["explanation_video_url"]
         if "explanation_recorded_audio" in request.FILES:
             data["explanation_recorded_audio"] = request.FILES["explanation_recorded_audio"]
         if "years" in data and data["years"] not in (None, ""):
@@ -1009,6 +1037,107 @@ class ResultListView(generics.ListAPIView):
             else:
                 queryset = queryset.filter(trials__student_submitted_exam_at__isnull=True).distinct()
         return queryset
+
+
+class TopStudentResultsView(generics.ListAPIView):
+    """Return the ten students with the highest sum of dashboard result scores."""
+
+    serializer_class = TopStudentResultSerializer
+    permission_classes = [IsAuthenticated]
+    filter_backends = [SearchFilter]
+    search_fields = [
+        "name",
+        "user__username",
+        "code",
+        "parent_phone",
+    ]
+
+    def get_queryset(self):
+        # Result.active_trial uses the latest submitted trial, falling back to
+        # the current trial only when the result has never been submitted.
+        active_trial = (
+            ResultTrial.objects.filter(result_id=OuterRef("pk"))
+            .annotate(
+                is_submitted=Case(
+                    When(student_submitted_exam_at__isnull=False, then=Value(True)),
+                    default=Value(False),
+                    output_field=BooleanField(),
+                )
+            )
+            .order_by("-is_submitted", "-trial")
+        )
+
+        result_totals = (
+            Result.objects.filter(student_id=OuterRef("pk"))
+            .annotate(
+                active_score=Coalesce(
+                    Subquery(
+                        active_trial.values("score")[:1],
+                        output_field=FloatField(),
+                    ),
+                    Value(0.0),
+                ),
+                active_exam_score=Coalesce(
+                    Subquery(
+                        active_trial.values("exam_score")[:1],
+                        output_field=FloatField(),
+                    ),
+                    Value(0.0),
+                ),
+            )
+            .values("student_id")
+            .annotate(
+                total_student_score=Sum("active_score"),
+                total_exam_score=Sum("active_exam_score"),
+                result_count=Count("id"),
+            )
+        )
+
+        return (
+            Student.objects.filter(
+                id__in=Result.objects.values("student_id")
+            )
+            .select_related("user")
+            .annotate(
+                total_student_score=Coalesce(
+                    Subquery(
+                        result_totals.values("total_student_score")[:1],
+                        output_field=FloatField(),
+                    ),
+                    Value(0.0),
+                ),
+                total_exam_score=Coalesce(
+                    Subquery(
+                        result_totals.values("total_exam_score")[:1],
+                        output_field=FloatField(),
+                    ),
+                    Value(0.0),
+                ),
+                results_count=Coalesce(
+                    Subquery(
+                        result_totals.values("result_count")[:1],
+                        output_field=IntegerField(),
+                    ),
+                    Value(0),
+                ),
+            )
+            .order_by("-total_student_score", "id")
+        )
+
+    def list(self, request, *args, **kwargs):
+        students = list(self.filter_queryset(self.get_queryset())[:10])
+        for rank, student in enumerate(students, start=1):
+            student.rank = rank
+
+        data = self.get_serializer(students, many=True).data
+        return Response(
+            {
+                "count": len(data),
+                "next": None,
+                "previous": None,
+                "results": data,
+            }
+        )
 
 
 class ReduceResultTrialView(APIView):

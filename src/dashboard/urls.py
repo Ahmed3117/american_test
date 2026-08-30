@@ -47,6 +47,7 @@ urlpatterns = [
     path("exam-models/<int:exam_model_id>/questions/<int:question_id>/", exam_views.RemoveQuestionFromExamModel.as_view(), name="remove-exam-model-question"),
     path("exams/<int:exam_id>/suggest-model-questions/", exam_views.SuggestQuestionsForModel.as_view(), name="suggest-model-questions"),
     path("exams/<int:exam_id>/models/<int:exam_model_id>/questions/", exam_views.AddQuestionsToModel.as_view(), name="add-questions-to-model"),
+    path("results/top-students/", exam_views.TopStudentResultsView.as_view(), name="top-student-results"),
     path("results/", exam_views.ResultListView.as_view(), name="result-list"),
     path("results/<int:result_id>/reduce-trial/", exam_views.ReduceResultTrialView.as_view(), name="reduce-result-trial"),
     path("results/<int:result_id>/detail/", exam_views.ExamResultDetailView.as_view(), name="exam-result-detail"),

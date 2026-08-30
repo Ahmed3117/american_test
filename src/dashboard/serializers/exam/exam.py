@@ -20,6 +20,7 @@ from exam.models import (
     Year,
 )
 from student.models import Student
+from exam.serializer_fields import StoredFileField, stored_file_url
 
 
 class QuestionImageSerializer(serializers.ModelSerializer):
@@ -44,6 +45,7 @@ class AnswerSerializer(serializers.ModelSerializer):
 class QuestionSerializer(serializers.ModelSerializer):
     answers = AnswerSerializer(many=True, required=False)
     images = QuestionImageSerializer(many=True, read_only=True)
+    explanation_video_url = StoredFileField(required=False, allow_null=True)
     years = serializers.PrimaryKeyRelatedField(
         many=True,
         queryset=Year.objects.all(),
@@ -276,7 +278,9 @@ class EssaySubmissionSerializer(serializers.ModelSerializer):
         data["question"] = instance.question.text
         data["question_points"] = instance.question.points
         data["question_explanation_text"] = instance.question.explanation_text
-        data["question_explanation_video_url"] = instance.question.explanation_video_url
+        data["question_explanation_video_url"] = stored_file_url(
+            instance.question.explanation_video_url
+        )
         data["question_explanation_recorded_audio"] = instance.question.explanation_recorded_audio.url if instance.question.explanation_recorded_audio else None
         data["question_comment"] = instance.question.comment
         data["question_image"] = (
@@ -423,6 +427,33 @@ class ResultSerializer(serializers.ModelSerializer):
     def get_submitted_by_unsubscribed_user(self, obj):
         trial = self._active_trial(obj)
         return trial.submitted_by_unsubscribed_user if trial else False
+
+
+class TopStudentResultSerializer(serializers.ModelSerializer):
+    """Aggregate leaderboard row shaped like the student part of a result row."""
+
+    rank = serializers.IntegerField(read_only=True)
+    student_id = serializers.IntegerField(source="id", read_only=True)
+    student_name = serializers.CharField(source="name", read_only=True)
+    student_phone = serializers.CharField(source="user.username", read_only=True)
+    student_gender = serializers.CharField(source="user.gender", read_only=True)
+    student_score = serializers.FloatField(source="total_student_score", read_only=True)
+    exam_score = serializers.FloatField(source="total_exam_score", read_only=True)
+    results_count = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = Student
+        fields = [
+            "rank",
+            "student_id",
+            "student_name",
+            "student_phone",
+            "student_gender",
+            "parent_phone",
+            "student_score",
+            "exam_score",
+            "results_count",
+        ]
 
 
 class BriefedResultSerializer(serializers.ModelSerializer):

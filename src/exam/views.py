@@ -32,6 +32,7 @@ from .models import AddReasonChoices, Answer, EssaySubmission, Exam, ExamModel, 
 from course.models import Course, Unit
 from subscription.models import CourseSubscription
 from subscription.access import student_has_course_access
+from .serializer_fields import stored_file_url
 
 
 def _student_has_exam_access(student, exam):
@@ -47,7 +48,7 @@ def _question_explanation_fields(question, prefix="question_explanation"):
         }
     return {
         f"{prefix}_text": question.explanation_text,
-        f"{prefix}_video_url": question.explanation_video_url,
+        f"{prefix}_video_url": stored_file_url(question.explanation_video_url),
         f"{prefix}_recorded_audio": question.explanation_recorded_audio.url if question.explanation_recorded_audio else None,
     }
 
@@ -1628,4 +1629,3 @@ class StudentCreatedExamListView(generics.ListAPIView):
         return StudentCreatedExam.objects.filter(
             student=student
         ).select_related('course', 'unit').order_by('-created')
-

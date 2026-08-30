@@ -4,6 +4,7 @@ from course.models import Course, Unit
 from .models import Answer, Exam, ExamType, Question, QuestionImage, Result, StudentBank, TempExam, AdminQuestionBank, StudentCreatedExam
 from student.models import Student,StudentFavorite
 from django.contrib.contenttypes.models import ContentType
+from .serializer_fields import StoredFileField
 
 class ExamSerializer(serializers.ModelSerializer):
     status = serializers.CharField(read_only=True)
@@ -113,6 +114,7 @@ class QuestionImageSerializer(serializers.ModelSerializer):
 class QuestionSerializerWithoutCorrectAnswer(serializers.ModelSerializer):
     answers = AnswerSerializer(many=True, required=False)
     images = QuestionImageSerializer(many=True, read_only=True)
+    explanation_video_url = StoredFileField(read_only=True)
     years = serializers.SerializerMethodField()
 
     class Meta:
@@ -130,6 +132,7 @@ class AnswerSerializerWithCorrectAnswer(serializers.ModelSerializer):
 class QuestionSerializerWithCorrectAnswer(serializers.ModelSerializer):
     answers = AnswerSerializerWithCorrectAnswer(many=True, required=False)
     images = QuestionImageSerializer(many=True, read_only=True)
+    explanation_video_url = StoredFileField(read_only=True)
     years = serializers.SerializerMethodField()
 
     class Meta:
@@ -366,7 +369,7 @@ class AdminQuestionBankSerializer(serializers.ModelSerializer):
     question_type = serializers.CharField(source='question.question_type', read_only=True)
     question_points = serializers.IntegerField(source='question.points', read_only=True)
     question_explanation_text = serializers.CharField(source='question.explanation_text', read_only=True, allow_null=True)
-    question_explanation_video_url = serializers.URLField(source='question.explanation_video_url', read_only=True, allow_null=True)
+    question_explanation_video_url = StoredFileField(source='question.explanation_video_url', read_only=True, allow_null=True)
     question_explanation_recorded_audio = serializers.FileField(source='question.explanation_recorded_audio', read_only=True, allow_null=True)
 
     class Meta:
