@@ -22,21 +22,19 @@ def get_full_file_url(file_field, request=None):
     if file_path.startswith('http://') or file_path.startswith('https://'):
         return file_path
     
-    # Build full URL using S3 custom domain or request
-    custom_domain = getattr(settings, 'AWS_S3_CUSTOM_DOMAIN', None)
-    
-    if custom_domain:
-        # Use S3/R2 custom domain
-        return f"https://{custom_domain}/{file_path}"
-    elif request:
-        # Use request to build absolute URI
-        return request.build_absolute_uri(f"{settings.MEDIA_URL}{file_path}")
-    else:
-        # Fallback to MEDIA_URL
+    # Let the active Django storage backend construct the URL. This works for
+    # R2, S3, and local FileSystemStorage without duplicating backend logic.
+    try:
+        file_url = file_field.url
+    except (AttributeError, ValueError):
         media_url = getattr(settings, 'MEDIA_URL', '/media/')
-        if media_url.startswith('http'):
-            return f"{media_url.rstrip('/')}/{file_path}"
-        return f"{media_url}{file_path}"
+        file_url = f"{media_url.rstrip('/')}/{file_path.lstrip('/')}"
+
+    if file_url.startswith(('http://', 'https://')):
+        return file_url
+    if request:
+        return request.build_absolute_uri(file_url)
+    return file_url
 
 
 class UserSerializer(serializers.ModelSerializer):

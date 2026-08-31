@@ -1,7 +1,9 @@
-from django.contrib import admin
-from django.db.models import Max
+from django.contrib import admin, messages
+from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
+from django.db import transaction
+from django.template.response import TemplateResponse
 
-from exam.models import StudentBank, TempExam, TempExamAllowedTimes, Answer, EssaySubmission, Exam, ExamQuestion, Question, QuestionCategory, QuestionImage, Result, ResultTrial, Submission, AdminQuestionBank, StudentCreatedExam, Year
+from exam.models import StudentBank, TempExam, TempExamAllowedTimes, Answer, EssaySubmission, Exam, ExamConfig, ExamModelQuestion, ExamQuestion, Question, QuestionCategory, QuestionImage, RandomExamBank, Result, ResultTrial, Submission, AdminQuestionBank, StudentCreatedExam, Year
 
 # Register your models here.
 
@@ -42,16 +44,133 @@ class ExamAdmin(admin.ModelAdmin):
     list_display = (
         'id',
         'title',
+        'student',
         'course',
         'unit',
-        'is_active',
-        'allow_unsubscribed_access',
-        'start',
-        'end',
+        'category',
+        'number_of_questions',
+        'time_limit',
+        'created',
     )
-    list_editable = ('is_active', 'allow_unsubscribed_access')
-    list_filter = ('allow_unsubscribed_access', 'is_active', 'related_to', 'type', 'course', 'unit')
-    search_fields = ('title', 'description', 'course__name', 'unit__name')
+    list_filter = ('course', 'unit', 'category', 'years')
+    search_fields = ('title', 'student__name', 'student__user__username', 'course__name', 'unit__name')
+    filter_horizontal = ('years',)
+    readonly_fields = [field.name for field in Exam._meta.fields] + ['years']
+    actions = ('detach_questions_from_selected_legacy_exams',)
+
+    def has_detach_questions_permission(self, request):
+        """Limit the destructive cleanup action to superusers."""
+        return request.user.is_active and request.user.is_staff and request.user.is_superuser
+
+    @staticmethod
+    def _question_relation_counts(exam_ids):
+        random_bank_ids = RandomExamBank.objects.filter(
+            exam_id__in=exam_ids
+        ).values_list('id', flat=True)
+        direct_count = ExamQuestion.objects.filter(exam_id__in=exam_ids).count()
+        random_bank_count = RandomExamBank.questions.through.objects.filter(
+            randomexambank_id__in=random_bank_ids
+        ).count()
+        exam_model_count = ExamModelQuestion.objects.filter(
+            exam_model__exam_id__in=exam_ids
+        ).count()
+        return {
+            'direct': direct_count,
+            'random_bank': random_bank_count,
+            'exam_model': exam_model_count,
+            'total': direct_count + random_bank_count + exam_model_count,
+        }
+
+    @admin.action(
+        permissions=('detach_questions',),
+        description='Detach questions from selected legacy exams (preserve questions)',
+    )
+    def detach_questions_from_selected_legacy_exams(self, request, queryset):
+        """Remove exam composition links without deleting Question-owned data."""
+        exam_ids = list(queryset.values_list('id', flat=True))
+        if not exam_ids:
+            self.message_user(request, 'No exams were selected.', level=messages.WARNING)
+            return None
+
+        student_owned_count = queryset.exclude(student__isnull=True).count()
+        if student_owned_count:
+            self.message_user(
+                request,
+                (
+                    'Nothing was detached. The selection contains '
+                    f'{student_owned_count} student-owned exam(s); only legacy exams '
+                    'with no owner can use this action.'
+                ),
+                level=messages.ERROR,
+            )
+            return None
+
+        counts = self._question_relation_counts(exam_ids)
+        if request.POST.get('confirm') != 'yes':
+            context = {
+                **self.admin_site.each_context(request),
+                'title': 'Confirm detaching questions from legacy exams',
+                'opts': self.model._meta,
+                'action_checkbox_name': ACTION_CHECKBOX_NAME,
+                'selected_ids': request.POST.getlist(ACTION_CHECKBOX_NAME),
+                'select_across': request.POST.get('select_across', '0'),
+                'exam_count': len(exam_ids),
+                'relation_counts': counts,
+            }
+            return TemplateResponse(
+                request,
+                'admin/exam/exam/detach_questions_confirmation.html',
+                context,
+            )
+
+        random_bank_ids = list(
+            RandomExamBank.objects.filter(exam_id__in=exam_ids).values_list('id', flat=True)
+        )
+        with transaction.atomic():
+            ExamQuestion.objects.filter(exam_id__in=exam_ids).delete()
+            RandomExamBank.questions.through.objects.filter(
+                randomexambank_id__in=random_bank_ids
+            ).delete()
+            ExamModelQuestion.objects.filter(
+                exam_model__exam_id__in=exam_ids
+            ).delete()
+            Exam.objects.filter(id__in=exam_ids).update(
+                number_of_questions=0,
+                easy_questions_count=0,
+                medium_questions_count=0,
+                hard_questions_count=0,
+            )
+
+        self.message_user(
+            request,
+            (
+                f"Detached {counts['total']} question relationship(s) from "
+                f'{len(exam_ids)} legacy exam(s). Question records and their '
+                'answers, images, and years were preserved.'
+            ),
+            level=messages.SUCCESS,
+        )
+        return None
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(ExamConfig)
+class ExamConfigAdmin(admin.ModelAdmin):
+    list_display = ('max_trials_per_day', 'max_trials_per_week', 'max_trials_per_month')
+
+    def has_add_permission(self, request):
+        return not ExamConfig.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(Year)
@@ -68,9 +187,18 @@ class YearAdmin(admin.ModelAdmin):
 @admin.register(ExamQuestion)
 class ExamQuestionAdmin(admin.ModelAdmin):
     list_display = ('exam', 'question', 'is_active', 'order', 'created')
-    list_editable = ('is_active', 'order')
     list_filter = ('exam', 'is_active', 'order')
     search_fields = ('exam__title', 'question__text')
+    readonly_fields = ('exam', 'question', 'is_active', 'order', 'created', 'updated')
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
 
 
 @admin.register(Submission)

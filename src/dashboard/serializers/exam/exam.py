@@ -7,6 +7,7 @@ from exam.models import (
     Answer,
     EssaySubmission,
     Exam,
+    ExamConfig,
     ExamModel,
     ExamQuestion,
     Question,
@@ -133,102 +134,68 @@ class QuestionSerializer(serializers.ModelSerializer):
 
 class ExamSerializer(serializers.ModelSerializer):
     status = serializers.SerializerMethodField()
-    related_course = serializers.SerializerMethodField()
-    related_course_name = serializers.SerializerMethodField()
-    related_unit = serializers.SerializerMethodField()
-    related_unit_name = serializers.SerializerMethodField()
-    calculated_score = serializers.SerializerMethodField()
-    calculated_number_of_questions = serializers.SerializerMethodField()
+    student_name = serializers.CharField(source='student.name', read_only=True)
+    student_phone = serializers.CharField(source='student.user.username', read_only=True)
+    course_name = serializers.CharField(source='course.name', read_only=True)
+    unit_name = serializers.CharField(source='unit.name', read_only=True)
+    category_name = serializers.CharField(source='category.title', read_only=True)
+    score = serializers.IntegerField(read_only=True)
+    passing_percent = serializers.IntegerField(read_only=True)
+    result_count = serializers.IntegerField(read_only=True)
+    trial_count = serializers.IntegerField(read_only=True)
 
     class Meta:
         model = Exam
         fields = [
             "id",
+            "student",
+            "student_name",
+            "student_phone",
             "title",
-            "description",
-            "related_to",
             "course",
-            "related_course",
-            "related_course_name",
+            "course_name",
             "unit",
-            "related_unit",
-            "related_unit_name",
-            "type",
+            "unit_name",
+            "category",
+            "category_name",
+            "years",
             "number_of_questions",
-            "time_limit",
-            "score",
-            "passing_percent",
-            "number_of_allowed_trials",
             "easy_questions_count",
             "medium_questions_count",
             "hard_questions_count",
-            "show_answers_after_finish",
-            "order",
-            "is_active",
-            "allow_unsubscribed_access",
-            "start",
-            "end",
-            "allow_show_results_at",
-            "allow_show_answers_at",
+            "time_limit",
+            "score",
+            "passing_percent",
             "created",
             "status",
-            "calculated_score",
-            "calculated_number_of_questions",
-            "is_depends",
-            "ponus_option",
-            "ponus",
-            "show_questions_in_random",
+            "result_count",
+            "trial_count",
         ]
-        read_only_fields = [
-            "id",
-            "created",
-            "status",
-            "related_course",
-            "related_course_name",
-            "related_unit",
-            "related_unit_name",
-            "calculated_score",
-            "calculated_number_of_questions",
-        ]
+        read_only_fields = fields
 
     def get_status(self, obj):
         return obj.status()
 
-    def get_related_course(self, obj):
-        return obj.get_related_course()
 
-    def get_related_course_name(self, obj):
-        return obj.course.name if obj.course else None
+class ExamConfigSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = ExamConfig
+        fields = [
+            'max_trials_per_day',
+            'max_trials_per_week',
+            'max_trials_per_month',
+        ]
 
-    def get_related_unit(self, obj):
-        return obj.unit_id if obj.unit else None
-
-    def get_related_unit_name(self, obj):
-        return obj.unit.name if obj.unit else None
-
-    def get_calculated_score(self, obj):
-        return obj.calculate_score()
-
-    def get_calculated_number_of_questions(self, obj):
-        return obj.calculate_number_of_questions()
-
-    def validate(self, data):
-        related_to = data.get("related_to", getattr(self.instance, "related_to", None))
-        course = data.get("course", getattr(self.instance, "course", None))
-        unit = data.get("unit", getattr(self.instance, "unit", None))
-
-        if unit:
-            data["course"] = unit.course
-            course = unit.course
-        if related_to == RelatedToChoices.COURSE and not course:
-            raise serializers.ValidationError("Course is required when related_to is COURSE.")
-        if related_to == RelatedToChoices.UNIT and not unit:
-            raise serializers.ValidationError("Unit is required when related_to is UNIT.")
-        if related_to == RelatedToChoices.COURSE and unit:
-            raise serializers.ValidationError("A course exam cannot also target a unit.")
-        if related_to not in {RelatedToChoices.COURSE, RelatedToChoices.UNIT}:
-            raise serializers.ValidationError("Exam must be related to either a course or a unit.")
-        return data
+    def validate(self, attrs):
+        instance = self.instance or ExamConfig()
+        daily = attrs.get('max_trials_per_day', instance.max_trials_per_day)
+        weekly = attrs.get('max_trials_per_week', instance.max_trials_per_week)
+        monthly = attrs.get('max_trials_per_month', instance.max_trials_per_month)
+        if daily > weekly:
+            raise serializers.ValidationError('max_trials_per_week must be at least max_trials_per_day.')
+        if weekly > monthly:
+            raise serializers.ValidationError('max_trials_per_month must be at least max_trials_per_week.')
+        return attrs
 
 
 class QuestionCategorySerializer(serializers.ModelSerializer):
@@ -398,7 +365,9 @@ class ResultSerializer(serializers.ModelSerializer):
         return obj.is_allowed_to_show_result if hasattr(obj, "is_allowed_to_show_result") else False
 
     def get_number_of_allowed_trials(self, obj):
-        return getattr(obj.exam, "number_of_allowed_trials", getattr(obj, "number_of_allowed_trials", 0))
+        if not hasattr(self, '_main_exam_daily_limit'):
+            self._main_exam_daily_limit = ExamConfig.load().max_trials_per_day
+        return self._main_exam_daily_limit
 
     def get_student_name(self, obj):
         return getattr(obj.student, "name", getattr(obj, "student_name", ""))
@@ -480,8 +449,8 @@ class BriefedResultSerializer(serializers.ModelSerializer):
 class FlattenedExamResultSerializer(serializers.ModelSerializer):
     exam_id = serializers.IntegerField(source="id")
     exam_title = serializers.CharField(source="title")
-    exam_description = serializers.CharField(source="description", allow_null=True)
-    exam_number_of_allowed_trials = serializers.IntegerField(source="number_of_allowed_trials")
+    exam_description = serializers.SerializerMethodField()
+    exam_number_of_allowed_trials = serializers.SerializerMethodField()
     course_title = serializers.SerializerMethodField()
     unit_title = serializers.SerializerMethodField()
     passing_percent = serializers.FloatField()
@@ -516,6 +485,14 @@ class FlattenedExamResultSerializer(serializers.ModelSerializer):
 
     def get_course_title(self, obj):
         return obj.course.name if obj.course else None
+
+    def get_exam_description(self, obj):
+        return None
+
+    def get_exam_number_of_allowed_trials(self, obj):
+        if not hasattr(self, '_main_exam_daily_limit'):
+            self._main_exam_daily_limit = ExamConfig.load().max_trials_per_day
+        return self._main_exam_daily_limit
 
     def get_unit_title(self, obj):
         return obj.unit.name if obj.unit else None

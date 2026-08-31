@@ -4,9 +4,10 @@ from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework.parsers import MultiPartParser, JSONParser
-from rest_framework.permissions import IsAdminUser, IsAuthenticated
+from rest_framework.permissions import BasePermission, IsAdminUser, IsAuthenticated
 from rest_framework import generics
 from django.shortcuts import get_object_or_404
+from django.http import Http404
 from django.utils import timezone
 from django.db.models import Count, Q, Case, When, BooleanField, Sum, Subquery, OuterRef, IntegerField, Min, Max
 from django.db.models.functions import Coalesce
@@ -28,15 +29,19 @@ except ImportError:
         return decorator(func) if func else decorator
 # Models
 from .serializers import ExamSerializer, QuestionSerializerWithCorrectAnswer, QuestionSerializerWithoutCorrectAnswer, StudentBankSerializer, StudentExamResultSerializer, AdminQuestionBankSerializer, StudentCreatedExamSerializer
-from .models import AddReasonChoices, Answer, EssaySubmission, Exam, ExamModel, ExamModelQuestion, ExamQuestion, ExamType, Question, QuestionType, Result, ResultTrial, StudentBank, Submission, TempExam, TempExamAllowedTimes, AdminQuestionBank, StudentCreatedExam
+from .models import AddReasonChoices, Answer, EssaySubmission, Exam, ExamModel, ExamModelQuestion, ExamQuestion, Question, QuestionType, Result, ResultTrial, StudentBank, Submission, TempExam, TempExamAllowedTimes, AdminQuestionBank, StudentCreatedExam
 from course.models import Course, Unit
-from subscription.models import CourseSubscription
+from student.models import Student
 from subscription.access import student_has_course_access
 from .serializer_fields import stored_file_url
+from .services import trial_quota_status
 
 
-def _student_has_exam_access(student, exam):
-    return exam.allow_unsubscribed_access or student_has_course_access(student, exam.course)
+class HasStudentProfile(BasePermission):
+    message = 'A student account is required.'
+
+    def has_permission(self, request, view):
+        return hasattr(request.user, 'student')
 
 
 def _question_explanation_fields(question, prefix="question_explanation"):
@@ -71,58 +76,48 @@ def _first_question_image_url(question):
     return first.image.url if first else None
 
 
-class OpenExamListView(generics.ListAPIView):
-    """List active exam records that do not require a course subscription."""
-
+class StudentExamListCreateView(generics.ListCreateAPIView):
+    """List and create the authenticated student's main exams."""
     serializer_class = ExamSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasStudentProfile]
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ["course", "unit", "related_to", "type", "is_depends"]
-    search_fields = ["title", "description", "course__name", "unit__name"]
-    ordering_fields = ["order", "start", "end", "created", "title"]
-    ordering = ["order", "created"]
+    filterset_fields = ["course", "unit", "category", "years"]
+    search_fields = ["title", "course__name", "unit__name", "category__title", "years__value"]
+    ordering_fields = ["created", "title", "number_of_questions", "time_limit"]
+    ordering = ["-created", "-id"]
 
     def get_queryset(self):
-        queryset = (
-            Exam.objects.filter(
-                is_active=True,
-                allow_unsubscribed_access=True,
-            )
-            .select_related("course", "unit")
-            .prefetch_related("exam_questions")
+        return (
+            Exam.objects.filter(student=self.request.user.student)
+            .select_related("student", "course", "unit", "category")
+            .prefetch_related("years", "exam_questions")
+            .distinct()
         )
 
-        status_filter = self.request.query_params.get("status")
-        now = timezone.now()
-        if status_filter == "soon":
-            queryset = queryset.filter(start__gt=now)
-        elif status_filter == "active":
-            queryset = queryset.filter(start__lte=now, end__gte=now)
-        elif status_filter == "finished":
-            queryset = queryset.filter(end__lt=now)
 
-        return queryset
+class StudentExamDetailView(generics.RetrieveAPIView):
+    serializer_class = ExamSerializer
+    permission_classes = [IsAuthenticated, HasStudentProfile]
+
+    def get_queryset(self):
+        return Exam.objects.filter(student=self.request.user.student).select_related(
+            'student', 'course', 'unit', 'category'
+        ).prefetch_related('years', 'exam_questions')
+
+
+class ExamConfigStatusView(APIView):
+    permission_classes = [IsAuthenticated, HasStudentProfile]
+
+    def get(self, request):
+        return Response(trial_quota_status(request.user.student))
 
 
 class CheckExamStartAbility(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasStudentProfile]
 
     def get(self, request, exam_id):
         student = request.user.student
-        exam = get_object_or_404(Exam, pk=exam_id)
-
-        if not _student_has_exam_access(student, exam):
-            return Response(
-                {"error": "You do not have access permissions"},
-                status=status.HTTP_401_UNAUTHORIZED,
-            )
-
-        exam_status = exam.status()
-        if exam_status != "active":
-            return Response(
-                {"status": exam_status},
-                status=status.HTTP_200_OK
-            )
+        exam = get_object_or_404(Exam, pk=exam_id, student=student)
 
         try:
             result = Result.objects.get(student=student, exam=exam)
@@ -143,195 +138,98 @@ class CheckExamStartAbility(APIView):
                         "trial_number": unsubmitted_trial.trial,
                         "started_at": unsubmitted_trial.student_started_exam_at,
                         "exam_model_id": unsubmitted_trial.exam_model.id if unsubmitted_trial.exam_model else None
-                    }
+                    },
+                    "quota": trial_quota_status(student),
                 }, status=status.HTTP_200_OK)
-
-            if result.is_trials_finished:
-                return Response(
-                    {"status": "trials_finished", "status_message": "انتهت جميع المحاولات"},
-                    status=status.HTTP_200_OK
-                )
 
         except Result.DoesNotExist:
             pass
 
-        return Response(
-            {"status": "can_start", "status_message": "يمكنك البدء"},
-            status=status.HTTP_200_OK
-        )
+        quota = trial_quota_status(student)
+        return Response({
+            "status": "can_start" if quota['can_start'] else "quota_reached",
+            "status_message": "يمكنك البدء" if quota['can_start'] else "تم بلوغ الحد المسموح للمحاولات",
+            "quota": quota,
+        })
 
 class StartExam(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasStudentProfile]
 
-    def _has_active_subscription(self, student, course):
-        return student_has_course_access(student, course)
-
-    def _get_exam_questions(self, exam, result):
-        if exam.type == ExamType.RANDOM:
-            return self._get_random_exam_questions(exam, result)
-        else:
-            return self._get_manual_exam_questions(exam)
-
-    def _get_random_exam_questions(self, exam, result):
-        exam_models = ExamModel.objects.filter(exam=exam, is_active=True)
-        if not exam_models.exists():
-            return None, None
-
-        exam_model = exam_models.order_by('?').first()
-        result.exam_model = exam_model
-        result.save()
-
-        questions = list(
-            ExamModelQuestion.objects
-            .filter(exam_model=exam_model, is_active=True)
-            .select_related("question")
-            .prefetch_related("question__answers", "question__years")
-        )
-        questions = [mq.question for mq in questions]
-        if exam.show_questions_in_random:
-            random.shuffle(questions)  # Shuffle the questions
-        return questions, exam_model
-
-    def _get_manual_exam_questions(self, exam):
-        questions = list(
+    def _get_exam_questions(self, exam):
+        relations = list(
             ExamQuestion.objects
-            .filter(exam=exam, question__is_active=True)
+            .filter(exam=exam, is_active=True)
             .select_related("question")
-            .prefetch_related("question__answers", "question__years")
+            .prefetch_related("question__answers", "question__years", "question__images")
+            .order_by('order', 'id')
         )
-        questions = [eq.question for eq in questions]
-        if exam.show_questions_in_random:
-            random.shuffle(questions)  # Shuffle the questions
-        return questions, None
+        return [relation.question for relation in relations]
 
+    @transaction.atomic
     def get(self, request, exam_id: int) -> Response:
         student = request.user.student
-        exam = get_object_or_404(Exam, pk=exam_id)
-        course = get_object_or_404(Course, id=exam.get_related_course())
+        exam = get_object_or_404(Exam, pk=exam_id, student=student)
+        Student.objects.select_for_update().get(pk=student.pk)
 
-        if not exam.allow_unsubscribed_access and not self._has_active_subscription(student, course):
+        questions = self._get_exam_questions(exam)
+        if len(questions) != exam.number_of_questions:
             return Response(
-                {"error": "You do not have access permissions"},
-                status=status.HTTP_401_UNAUTHORIZED,
+                {"error": "The exam question set is incomplete."},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Ensure the exam is active
-        exam_status = exam.status()
-        if exam_status != "active":
-            return Response(
-                {"error": f"Exam is {exam_status}"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Get or create Result
-        result, created = Result.objects.get_or_create(
-            student=student,
-            exam=exam,
-            defaults={'trial': 0}
-        )
-
-        # Check if trials are finished
-        if not created and result.is_trials_finished:
-            return Response(
-                {"error": "You have finished your allowed trials for this exam"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Check for an unsubmitted trial
-        unsubmitted_trial = result.trials.filter(student_submitted_exam_at__isnull=True).order_by('-trial').first()
+        result = Result.objects.filter(student=student, exam=exam).first()
+        unsubmitted_trial = None
+        if result:
+            unsubmitted_trial = result.trials.filter(
+                student_submitted_exam_at__isnull=True
+            ).order_by('-trial').first()
 
         if unsubmitted_trial:
-            # Use the existing unsubmitted trial
             result_trial = unsubmitted_trial
-            questions, exam_model = self._get_exam_questions(exam, result)
-            if questions is None:
-                return Response(
-                    {"error": "No models available for this random exam"},
-                    status=status.HTTP_400_BAD_REQUEST,
-                )
-            if exam_model and not result_trial.exam_model:
-                result_trial.exam_model = exam_model
-                result_trial.save()
-
-            # Serialize questions
-            question_data = QuestionSerializerWithoutCorrectAnswer(
-                questions,
-                many=True,
-                context={"request": request},
-            ).data
-
-            return Response(
-                {
-                    "exam_id": exam.id,
-                    "exam_title": exam.title,
-                    "exam_time_limit": exam.time_limit,
-                    "questions": question_data,
-                    "exam_model": {
-                        "id": exam_model.id,
-                        "title": exam_model.title
-                    } if exam_model else None,
-                    "resuming": True,
-                    "trial_id": result_trial.id,
-                    "started_at": result_trial.student_started_exam_at
-                },
-                status=status.HTTP_200_OK
-            )
+            resuming = True
         else:
-            # Fetch questions before consuming a trial so misconfigured random
-            # exams do not create an unusable attempt.
-            questions, exam_model = self._get_exam_questions(exam, result)
-            if questions is None:
+            quota = trial_quota_status(student)
+            if not quota['can_start']:
                 return Response(
-                    {"error": "No models available for this random exam"},
-                    status=status.HTTP_400_BAD_REQUEST,
+                    {"error": "Trial quota reached.", "quota": quota},
+                    status=status.HTTP_429_TOO_MANY_REQUESTS,
                 )
-
-            # Increment trial counter
+            if result is None:
+                result = Result.objects.create(student=student, exam=exam, trial=0)
             result.trial += 1
-            result.save()
-
-            # Create a new ResultTrial for the current trial
+            result.save(update_fields=['trial'])
             result_trial = ResultTrial.objects.create(
                 result=result,
                 trial=result.trial,
                 student_started_exam_at=timezone.now()
             )
+            resuming = False
 
-            if exam_model:
-                result_trial.exam_model = exam_model
-                result_trial.save()
-
-            # Serialize questions
-            question_data = QuestionSerializerWithoutCorrectAnswer(
-                questions,
-                many=True,
-                context={"request": request},
-            ).data
-
-            return Response(
-                {
-                    "exam_id": exam.id,
-                    "exam_title": exam.title,
-                    "exam_time_limit": exam.time_limit,
-                    "questions": question_data,
-                    "exam_model": {
-                        "id": exam_model.id,
-                        "title": exam_model.title
-                    } if exam_model else None,
-                    "resuming": False,
-                    "trial_id": result_trial.id
-                },
-                status=status.HTTP_200_OK
-            )
+        question_data = QuestionSerializerWithoutCorrectAnswer(
+            questions,
+            many=True,
+            context={"request": request, "main_exam": True},
+        ).data
+        return Response({
+            "exam_id": exam.id,
+            "exam_title": exam.title,
+            "exam_time_limit": exam.time_limit,
+            "questions": question_data,
+            "exam_model": None,
+            "resuming": resuming,
+            "trial_id": result_trial.id,
+            "started_at": result_trial.student_started_exam_at,
+        })
 
 class SubmitExam(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasStudentProfile]
     parser_classes = [MultiPartParser]
 
     @transaction.atomic
     def post(self, request, exam_id):
         student = request.user.student
-        exam = get_object_or_404(Exam, pk=exam_id)
+        exam = get_object_or_404(Exam, pk=exam_id, student=student)
         submit_type = request.data.get("submit_type", "student_submit")
         
         # Add idempotency key to prevent duplicate submissions from network retries
@@ -355,6 +253,25 @@ class SubmitExam(APIView):
             return Response(
                 {"error": "يرجى إرسال إجابات للأسئلة"},
                 status=status.HTTP_400_BAD_REQUEST
+            )
+
+        exam_questions = {
+            question.id: question
+            for question in Question.objects.filter(
+                id__in=question_ids,
+                question_type=QuestionType.MCQ,
+                exam_questions__exam=exam,
+                exam_questions__is_active=True,
+            ).distinct()
+        }
+        invalid_question_ids = sorted(question_ids - set(exam_questions))
+        if invalid_question_ids:
+            return Response(
+                {
+                    "error": "All submitted questions must be MCQs from this exam.",
+                    "invalid_question_ids": invalid_question_ids,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         # Get or create Result and ResultTrial with select_for_update to prevent race conditions
@@ -387,7 +304,7 @@ class SubmitExam(APIView):
 
         # Process each question using update_or_create for better performance
         for question_id in question_ids:
-            question = get_object_or_404(Question, pk=question_id)
+            question = exam_questions[question_id]
             if question.question_type == QuestionType.MCQ:
                 # Process MCQ answer
                 selected_answer_id = request.data.get(f"selected_answer_id_{question_id}")
@@ -459,65 +376,21 @@ class SubmitExam(APIView):
                         question=question,
                         defaults={"add_reason": AddReasonChoices.UNSOLVED}
                     )
-            elif question.question_type == QuestionType.ESSAY:
-                # Process Essay answer
-                essay_answer_text = request.data.get(f"essay_answer_text_{question_id}", "")
-                # Handle file upload
-                essay_answer_file = request.FILES.get(f"essay_file_{question_id}")
-                # Update or create essay submission
-                essay_submission, created = EssaySubmission.objects.update_or_create(
-                    student=student,
-                    exam=exam,
-                    question=question,
-                    result_trial=result_trial,
-                    defaults={
-                        'answer_text': essay_answer_text,
-                        'answer_file': essay_answer_file,
-                        'is_scored': False,
-                        'score': None
-                    }
-                )
-
         # Calculate scores
         try:
-            # Calculate MCQ score
-            mcq_score = Submission.objects.filter(
+            total_score = Submission.objects.filter(
                 result_trial=result_trial,
                 is_correct=True
-            ).aggregate(total=Sum('question__points'))['total'] or 0
-
-            # Calculate essay score (only scored essays)
-            essay_score = EssaySubmission.objects.filter(
-                result_trial=result_trial,
-                is_scored=True
-            ).aggregate(total=Sum('score'))['total'] or 0
-
-            total_score = mcq_score + essay_score
-
-            # Get exam total score
-            if result.exam.type == ExamType.RANDOM and result_trial.exam_model:
-                exam_score = ExamModelQuestion.objects.filter(
-                    exam_model=result_trial.exam_model
-                ).aggregate(total=Sum('question__points'))['total'] or 0
-            else:
-                exam_score = Question.objects.filter(
-                    exam_questions__exam=result.exam,
-                    is_active=True
-                ).aggregate(total=Sum('points'))['total'] or 0
+            ).count()
+            exam_score = result.exam.exam_questions.filter(is_active=True).count()
 
             # Update trial and result
             result_trial.score = total_score
             result_trial.exam_score = exam_score
             result_trial.student_submitted_exam_at = timezone.now()
             result_trial.submit_type = submit_type
-            result_trial.submitted_by_unsubscribed_user = not student_has_course_access(
-                student,
-                result.exam.course,
-            )
+            result_trial.submitted_by_unsubscribed_user = False
             result_trial.save()
-
-            result.score = total_score
-            result.save()
 
         except Exception as e:
             # Log the error for debugging
@@ -538,22 +411,25 @@ class SubmitExam(APIView):
         return Response({
             "message": "تم إرسال الإجابات بنجاح",
             "score": total_score,
-            "is_succeeded": total_score >= (exam.passing_percent / 100) * result_trial.exam_score,
+            "is_succeeded": total_score >= (Exam.PASSING_PERCENT / 100) * result_trial.exam_score,
             "trial": result.trial
         }, status=status.HTTP_200_OK)
 
 
 class StudentExamResultsView(generics.ListAPIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasStudentProfile]
     serializer_class = StudentExamResultSerializer
     filter_backends = [DjangoFilterBackend, RelatedCourseFilterBackend]
-    filterset_fields = ['exam__course', 'exam__unit', 'exam__related_to']
+    filterset_fields = ['exam__course', 'exam__unit', 'exam__category']
 
     def get_queryset(self):
         student = self.request.user.student
         now = timezone.now()
 
-        return Result.objects.filter(student=student).select_related(
+        return Result.objects.filter(
+            student=student,
+            trials__isnull=False,
+        ).select_related(
             'exam', 
             'exam__course',
             'exam__unit',
@@ -569,7 +445,6 @@ class StudentExamResultsView(generics.ListAPIView):
             Prefetch(
                 'exam__exam_questions',
                 queryset=ExamQuestion.objects.select_related('question')
-                    .filter(question__is_active=True)
             ),
             # Prefetch(  # Commented out as not needed
             #     'exam__submissions',
@@ -581,11 +456,11 @@ class StudentExamResultsView(generics.ListAPIView):
                 queryset=ExamModelQuestion.objects.all(),
                 to_attr='prefetched_model_questions'
             )
-        ).order_by('-added')
+        ).distinct().order_by('-added')
 
 
 class GetMyExamResult(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasStudentProfile]
 
     def get(self, request, exam_id):
         student = request.user.student
@@ -676,7 +551,7 @@ class GetMyExamResult(APIView):
                 "selected_answer": selected_answer_obj,  # Updated to include full object
                 "is_correct": submission.is_correct if submission.is_correct is not None else False,
                 "is_solved": submission.is_solved if submission.is_solved is not None else False,
-                "points": question.points,
+                "points": 1,
                 "answers": answer_details  # Include all answers here
             }
             student_answers.append(answer_data)
@@ -737,7 +612,7 @@ class GetMyExamResult(APIView):
             "trial_number": active_trial.trial,
             "exam_id": exam.id,
             "exam_title": exam.title,
-            "exam_description": exam.description,
+            "exam_description": None,
             "exam_score": active_trial.exam_score if active_trial else 0,
             "student_score": active_trial.score if active_trial else 0,
             "is_succeeded": result.is_succeeded,
@@ -766,7 +641,7 @@ class GetMyExamResult(APIView):
 
 
 class GetMyExamResultForTrial(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasStudentProfile]
 
     def get(self, request, exam_id, result_trial_id):
         student = request.user.student
@@ -854,7 +729,7 @@ class GetMyExamResultForTrial(APIView):
                 "selected_answer": selected_answer_obj,
                 "is_correct": submission.is_correct if submission.is_correct is not None else False,
                 "is_solved": submission.is_solved if submission.is_solved is not None else False,
-                "points": question.points,
+                "points": 1,
                 "answers": answer_details
             }
             student_answers.append(answer_data)
@@ -909,7 +784,7 @@ class GetMyExamResultForTrial(APIView):
         # Determine if the student succeeded in this trial
         is_succeeded = False
         if trial.exam_score and trial.score is not None:
-            is_succeeded = trial.score >= (exam.passing_percent / 100) * trial.exam_score
+            is_succeeded = trial.score >= (Exam.PASSING_PERCENT / 100) * trial.exam_score
 
         # Response payload
         response_data = {
@@ -917,7 +792,7 @@ class GetMyExamResultForTrial(APIView):
             "trial_number": trial.trial,
             "exam_id": exam.id,
             "exam_title": exam.title,
-            "exam_description": exam.description,
+            "exam_description": None,
             "exam_score": trial.exam_score if trial else 0,
             "student_score": trial.score if trial else 0,
             "is_succeeded": is_succeeded,

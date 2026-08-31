@@ -7,6 +7,8 @@ from django.db.models import (
     BooleanField,
     Case,
     Count,
+    DateTimeField,
+    Exists,
     FloatField,
     IntegerField,
     Max,
@@ -36,6 +38,7 @@ from exam.models import (
     DifficultyLevel,
     EssaySubmission,
     Exam,
+    ExamConfig,
     ExamModel,
     ExamModelQuestion,
     ExamQuestion,
@@ -53,7 +56,6 @@ from exam.models import (
 )
 from exam.serializer_fields import stored_file_url
 from student.models import Student
-from subscription.models import CourseSubscription
 
 from dashboard.serializers.exam.exam import (
     AdminQuestionBankSerializer,
@@ -65,6 +67,7 @@ from dashboard.serializers.exam.exam import (
     ExamQuestionReorderSerializer,
     ExamQuestionSerializer,
     ExamSerializer,
+    ExamConfigSerializer,
     FlattenedExamResultSerializer,
     FlattenedStudentResultSerializer,
     QuestionCategorySerializer,
@@ -108,7 +111,8 @@ class ResultFilter(filters.FilterSet):
             "exam": ["exact"],
             "exam__course": ["exact"],
             "exam__unit": ["exact"],
-            "exam__related_to": ["exact"],
+            "exam__category": ["exact"],
+            "exam__years": ["exact"],
         }
 
 
@@ -123,10 +127,45 @@ class ResultTrialFilter(filters.FilterSet):
             "result__exam": ["exact"],
             "result__exam__course": ["exact"],
             "result__exam__unit": ["exact"],
+            "result__exam__category": ["exact"],
+            "result__exam__years": ["exact"],
             "submit_type": ["exact"],
             "trial": ["exact"],
             "submitted_by_unsubscribed_user": ["exact"],
         }
+
+
+class QuestionFilter(filters.FilterSet):
+    years = filters.CharFilter(method="filter_years")
+
+    def filter_years(self, queryset, name, value):
+        """Accept comma-separated Year primary keys, values, or a mix."""
+        tokens = [token.strip() for token in str(value).split(",") if token.strip()]
+        if not tokens:
+            return queryset
+
+        year_ids = []
+        for token in tokens:
+            try:
+                year_ids.append(int(token))
+            except (TypeError, ValueError):
+                continue
+
+        lookup = Q(years__value__in=tokens)
+        if year_ids:
+            lookup |= Q(years__id__in=year_ids)
+        return queryset.filter(lookup).distinct()
+
+    class Meta:
+        model = Question
+        fields = [
+            "course",
+            "unit",
+            "is_active",
+            "difficulty",
+            "category",
+            "question_type",
+        ]
 
 
 def _bool(value):
@@ -307,7 +346,7 @@ def _serialize_trial_answer(submission):
         "selected_answer": selected_answer,
         "is_correct": submission.is_correct,
         "is_solved": submission.is_solved,
-        "points": question.points,
+        "points": 1,
         "answers": answers,
     }
 
@@ -353,7 +392,7 @@ def _result_detail_payload(result, trial):
 
     is_succeeded = False
     if trial and trial.exam_score:
-        is_succeeded = trial.score >= (result.exam.passing_percent / 100) * trial.exam_score
+        is_succeeded = trial.score >= (Exam.PASSING_PERCENT / 100) * trial.exam_score
 
     return {
         "active_trial": trial.id if trial else None,
@@ -363,7 +402,7 @@ def _result_detail_payload(result, trial):
         "student_gender": result.student.user.gender,
         "exam_id": result.exam_id,
         "exam_title": result.exam.title,
-        "exam_description": result.exam.description,
+        "exam_description": None,
         "exam_score": trial.exam_score if trial else 0,
         "student_score": trial.score if trial else 0,
         "is_succeeded": is_succeeded,
@@ -400,40 +439,51 @@ def _result_detail_payload(result, trial):
     }
 
 
-class ExamListCreateView(generics.ListCreateAPIView):
-    queryset = Exam.objects.select_related("course", "unit").order_by("-created")
+class ExamListCreateView(generics.ListAPIView):
     serializer_class = ExamSerializer
     permission_classes = STAFF_PERMISSIONS
     filter_backends = [DjangoFilterBackend, OrderingFilter, SearchFilter]
-    filterset_fields = ["related_to", "is_active", "allow_unsubscribed_access", "course", "unit", "type", "created", "start", "end", "allow_show_results_at"]
-    search_fields = ["title", "description", "course__name", "unit__name"]
-    ordering_fields = ["order", "start", "end", "created"]
+    filterset_fields = ["student", "course", "unit", "category", "years", "created"]
+    search_fields = [
+        "title", "course__name", "unit__name", "category__title",
+        "years__value", "student__name", "student__user__username", "student__code",
+    ]
+    ordering_fields = ["created", "title", "number_of_questions", "time_limit"]
+    ordering = ["-created", "-id"]
 
     def get_queryset(self):
-        queryset = super().get_queryset()
-        status_filter = self.request.query_params.get("status")
-        if status_filter:
-            now = timezone.now()
-            if status_filter == "soon":
-                queryset = queryset.filter(start__gt=now)
-            elif status_filter == "active":
-                queryset = queryset.filter(start__lte=now, end__gte=now)
-            elif status_filter == "finished":
-                queryset = queryset.filter(end__lt=now)
-        related_course = self.request.query_params.get("related_course")
-        if related_course:
-            queryset = queryset.filter(_exam_course_filter(related_course))
-        return queryset
-
-    def perform_create(self, serializer):
-        exam = serializer.save()
-        exam.full_clean()
+        return Exam.objects.select_related(
+            "student", "student__user", "course", "unit", "category"
+        ).prefetch_related("years").annotate(
+            result_count=Count('results', distinct=True),
+            trial_count=Count('results__trials', distinct=True),
+        ).distinct()
 
 
-class ExamDetailView(generics.RetrieveUpdateDestroyAPIView):
-    queryset = Exam.objects.select_related("course", "unit")
+class ExamDetailView(generics.RetrieveAPIView):
+    queryset = Exam.objects.select_related(
+        "student", "student__user", "course", "unit", "category"
+    ).prefetch_related("years").annotate(
+        result_count=Count('results', distinct=True),
+        trial_count=Count('results__trials', distinct=True),
+    )
     serializer_class = ExamSerializer
     permission_classes = STAFF_PERMISSIONS
+
+
+class ExamConfigView(APIView):
+    permission_classes = STAFF_PERMISSIONS
+
+    def get(self, request):
+        return Response(ExamConfigSerializer(ExamConfig.load()).data)
+
+    def patch(self, request):
+        serializer = ExamConfigSerializer(
+            ExamConfig.load(), data=request.data, partial=True
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
 
 
 class QuestionCategoryListCreateView(generics.ListCreateAPIView):
@@ -482,27 +532,8 @@ class QuestionListCreateView(generics.ListCreateAPIView):
     serializer_class = QuestionSerializer
     parser_classes = (MultiPartParser, FormParser, JSONParser)
     filter_backends = (DjangoFilterBackend, SearchFilter)
-    filterset_fields = {
-        "course": ["exact"],
-        "unit": ["exact"],
-        "is_active": ["exact"],
-        "difficulty": ["exact"],
-        "category": ["exact"],
-        "question_type": ["exact"],
-        "years": ["exact"],
-    }
+    filterset_class = QuestionFilter
     search_fields = ["text", "answers__text"]
-
-    def get_queryset(self):
-        qs = super().get_queryset()
-        # multi-year support: ?years=2022,2024,2025 (accepts ids OR values)
-        years_param = self.request.query_params.get("years")
-        if years_param:
-            raw = [v.strip() for v in years_param.split(",") if v.strip()]
-            value_ids = [v for v in raw if v]
-            if value_ids:
-                qs = qs.filter(years__value__in=value_ids).distinct()
-        return qs
 
     def create(self, request, *args, **kwargs):
         if "answers" in request.data and not _has_indexed_answers(request.data):
@@ -594,10 +625,6 @@ class BulkQuestionCreateView(generics.CreateAPIView):
 
     def create(self, request, *args, **kwargs):
         created_questions = []
-        exam = None
-        exam_id = request.data.get("exam_id")
-        if exam_id:
-            exam = get_object_or_404(Exam, id=exam_id)
 
         with transaction.atomic():
             index = 0
@@ -629,8 +656,6 @@ class BulkQuestionCreateView(generics.CreateAPIView):
                 serializer = self.get_serializer(data=data)
                 serializer.is_valid(raise_exception=True)
                 question = serializer.save()
-                if exam:
-                    ExamQuestion.objects.get_or_create(exam=exam, question=question)
 
                 # Multiple images: questions[i][images][j] files (or repeated questions[i][images])
                 _create_question_images(
@@ -677,7 +702,7 @@ class BulkQuestionCreateView(generics.CreateAPIView):
                 index += 1
 
         data = self.get_serializer(created_questions, many=True).data
-        return Response({"exam_id": exam.id, "questions": data} if exam else data, status=status.HTTP_201_CREATED)
+        return Response(data, status=status.HTTP_201_CREATED)
 
 
 class AnswerListCreateView(generics.ListCreateAPIView):
@@ -768,13 +793,12 @@ class GetExamQuestions(APIView):
 
     def get(self, request, exam_id):
         exam = get_object_or_404(Exam, pk=exam_id)
-        if exam.type == ExamType.RANDOM:
-            return Response({"message": "هذا امتحان عشوائي، سأختار أسئلته عشوائياً"})
         exam_questions = ExamQuestion.objects.filter(exam=exam).select_related("question").order_by("order", "id")
         return Response({"exam_id": exam.id, "exam_title": exam.title, "questions": ExamQuestionSerializer(exam_questions, many=True).data})
 
 
 class ExamQuestionListCreateView(generics.ListAPIView):
+    http_method_names = ['get', 'head', 'options']
     permission_classes = STAFF_PERMISSIONS
     serializer_class = ExamQuestionSerializer
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
@@ -1024,12 +1048,14 @@ class ResultListView(generics.ListAPIView):
     permission_classes = STAFF_PERMISSIONS
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_class = ResultFilter
-    search_fields = ["student__name", "student__user__username", "exam__title", "exam__description"]
+    search_fields = ["student__name", "student__user__username", "exam__title"]
     ordering_fields = ["added", "trial"]
     ordering = ["-added"]
 
     def get_queryset(self):
-        queryset = Result.objects.select_related("student", "student__user", "exam", "exam__course", "exam__unit").prefetch_related("trials")
+        queryset = Result.objects.filter(trials__isnull=False).select_related(
+            "student", "student__user", "exam", "exam__course", "exam__unit"
+        ).prefetch_related("trials").distinct()
         submitted = self.request.query_params.get("submitted")
         if submitted is not None:
             if _bool(submitted):
@@ -1070,6 +1096,12 @@ class TopStudentResultsView(generics.ListAPIView):
         result_totals = (
             Result.objects.filter(student_id=OuterRef("pk"))
             .annotate(
+                has_trial=Exists(
+                    ResultTrial.objects.filter(result_id=OuterRef("pk"))
+                )
+            )
+            .filter(has_trial=True)
+            .annotate(
                 active_score=Coalesce(
                     Subquery(
                         active_trial.values("score")[:1],
@@ -1095,7 +1127,9 @@ class TopStudentResultsView(generics.ListAPIView):
 
         return (
             Student.objects.filter(
-                id__in=Result.objects.values("student_id")
+                id__in=Result.objects.filter(
+                    trials__isnull=False
+                ).values("student_id")
             )
             .select_related("user")
             .annotate(
@@ -1219,7 +1253,10 @@ class StudentsTookExamAPIView(generics.ListAPIView):
 
     def get_queryset(self):
         exam = get_object_or_404(Exam, id=self.kwargs["exam_id"])
-        queryset = Student.objects.filter(result__exam=exam).select_related("user").distinct()
+        queryset = Student.objects.filter(
+            result__exam=exam,
+            result__trials__isnull=False,
+        ).select_related("user").distinct()
         search = self.request.query_params.get("search")
         if search:
             queryset = queryset.filter(Q(name__icontains=search) | Q(code__icontains=search) | Q(parent_phone__icontains=search) | Q(user__username__icontains=search))
@@ -1240,26 +1277,20 @@ class StudentsDidNotTakeExamAPIView(generics.ListAPIView):
 
     def get_queryset(self):
         exam = get_object_or_404(Exam, id=self.kwargs["exam_id"])
-        related_course_id = exam.get_related_course()
-        if exam.allow_unsubscribed_access:
-            subscribed = Student.objects.all()
-        else:
-            subscribed = Student.objects.filter(
-                course_subscriptions__course_id=related_course_id,
-                course_subscriptions__active=True,
-            ).distinct()
-        queryset = subscribed.exclude(result__exam=exam)
+        taken_trial = ResultTrial.objects.filter(
+            result__exam=exam,
+            result__student_id=OuterRef("pk"),
+        )
+        queryset = Student.objects.filter(pk=exam.student_id).annotate(
+            has_taken_exam=Exists(taken_trial)
+        ).filter(has_taken_exam=False)
         search = self.request.query_params.get("search")
         if search:
             queryset = queryset.filter(Q(name__icontains=search) | Q(code__icontains=search) | Q(parent_phone__icontains=search) | Q(user__username__icontains=search))
         gender = self.request.query_params.get("gender")
         if gender:
             queryset = queryset.filter(user__gender__in=[value.strip() for value in gender.split(",") if value.strip()])
-        return queryset.annotate(
-            course_subscribed_at=Subquery(
-                CourseSubscription.objects.filter(student=OuterRef("pk"), course_id=related_course_id, active=True).order_by("-created_at").values("created_at")[:1]
-            )
-        )
+        return queryset.annotate(course_subscribed_at=Value(None, output_field=DateTimeField()))
 
 
 class ExamsTakenByStudentAPIView(generics.ListAPIView):
@@ -1268,10 +1299,13 @@ class ExamsTakenByStudentAPIView(generics.ListAPIView):
 
     def get_queryset(self):
         student = get_object_or_404(Student, id=self.kwargs["student_id"])
-        queryset = Exam.objects.filter(results__student=student).select_related("course", "unit").distinct()
+        queryset = Exam.objects.filter(
+            results__student=student,
+            results__trials__isnull=False,
+        ).select_related("course", "unit").distinct()
         search = self.request.query_params.get("search")
         if search:
-            queryset = queryset.filter(Q(title__icontains=search) | Q(description__icontains=search))
+            queryset = queryset.filter(Q(title__icontains=search))
         return queryset
 
     def get_serializer_context(self):
@@ -1286,13 +1320,18 @@ class ExamsNotTakenByStudentAPIView(generics.ListAPIView):
 
     def get_queryset(self):
         student = get_object_or_404(Student, id=self.kwargs["student_id"])
-        course_ids = CourseSubscription.objects.filter(student=student, active=True).values_list("course_id", flat=True)
-        queryset = Exam.objects.filter(
-            Q(course_id__in=course_ids) | Q(allow_unsubscribed_access=True)
-        ).exclude(results__student=student).select_related("course", "unit").distinct()
+        taken_trial = ResultTrial.objects.filter(
+            result__student=student,
+            result__exam_id=OuterRef("pk"),
+        )
+        queryset = Exam.objects.filter(student=student).annotate(
+            has_been_taken=Exists(taken_trial)
+        ).filter(has_been_taken=False).select_related(
+            "student", "course", "unit", "category"
+        ).distinct()
         search = self.request.query_params.get("search")
         if search:
-            queryset = queryset.filter(Q(title__icontains=search) | Q(description__icontains=search))
+            queryset = queryset.filter(Q(title__icontains=search))
         return queryset
 
 

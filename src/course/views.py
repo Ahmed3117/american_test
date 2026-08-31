@@ -4,7 +4,7 @@ from rest_framework.permissions import IsAuthenticated
 
 from exam.models import Exam
 from exam.serializers import ExamSerializer
-from subscription.access import get_accessible_course_ids_for_student, user_has_course_access
+from subscription.access import get_accessible_course_ids_for_student
 
 from .models import Course
 from .serializers import StudentCourseSerializer
@@ -53,7 +53,12 @@ class CourseExamListView(generics.ListAPIView):
 
     def get_queryset(self):
         course = get_object_or_404(Course, pk=self.kwargs["course_id"], is_active=True)
-        queryset = Exam.objects.filter(course=course, is_active=True)
-        if not user_has_course_access(self.request.user, course):
-            queryset = queryset.filter(allow_unsubscribed_access=True)
-        return queryset.order_by("order", "created")
+        student = getattr(self.request.user, 'student', None)
+        if not student:
+            return Exam.objects.none()
+        return Exam.objects.filter(
+            course=course,
+            student=student,
+        ).select_related('student', 'course', 'unit', 'category').prefetch_related(
+            'years', 'exam_questions'
+        ).order_by('-created', '-id')

@@ -1,55 +1,143 @@
 from rest_framework import serializers
+from django.db import transaction
 
 from course.models import Course, Unit
-from .models import Answer, Exam, ExamType, Question, QuestionImage, Result, StudentBank, TempExam, AdminQuestionBank, StudentCreatedExam
+from .models import (
+    Answer,
+    DifficultyLevel,
+    Exam,
+    ExamQuestion,
+    Question,
+    QuestionCategory,
+    QuestionImage,
+    Result,
+    StudentBank,
+    TempExam,
+    AdminQuestionBank,
+    StudentCreatedExam,
+    Year,
+)
 from student.models import Student,StudentFavorite
 from django.contrib.contenttypes.models import ContentType
 from .serializer_fields import StoredFileField
+from .services import select_exam_question_ids
+from subscription.access import student_has_course_access
 
 class ExamSerializer(serializers.ModelSerializer):
-    status = serializers.CharField(read_only=True)
+    student = serializers.PrimaryKeyRelatedField(read_only=True)
+    student_name = serializers.CharField(source='student.name', read_only=True)
+    course_name = serializers.CharField(source='course.name', read_only=True)
+    unit_name = serializers.CharField(source='unit.name', read_only=True)
+    category_name = serializers.CharField(source='category.title', read_only=True)
+    years = serializers.PrimaryKeyRelatedField(
+        queryset=Year.objects.all(), many=True, required=False, allow_null=True
+    )
+    status = serializers.SerializerMethodField()
     related_name = serializers.CharField(source='get_related_name', read_only=True)
-    number_of_questions = serializers.SerializerMethodField()
+    score = serializers.IntegerField(read_only=True)
+    passing_percent = serializers.IntegerField(read_only=True)
     has_passed_exam = serializers.SerializerMethodField()
     is_favorite = serializers.SerializerMethodField()
     favorite_id = serializers.SerializerMethodField()
+
     class Meta:
         model = Exam
         fields = [
             'id',
+            'student',
+            'student_name',
             'title',
-            'description',
-            'related_to',
             'course',
+            'course_name',
             'unit',
-            'type',
+            'unit_name',
+            'category',
+            'category_name',
+            'years',
             'number_of_questions',
+            'easy_questions_count',
+            'medium_questions_count',
+            'hard_questions_count',
             'time_limit',
             'score',
             'passing_percent',
-            'start',
-            'end',
-            'time_limit',
+            'created',
             'status',
             'related_name',
-            'order',
-            'is_active',
-            'allow_unsubscribed_access',
-            'show_answers_after_finish',
-            'is_depends',
-            'number_of_questions',
             'has_passed_exam',
             'is_favorite',
             'favorite_id',
         ]
-        
-    def get_number_of_questions(self,obj):
-        if obj.type == ExamType.RANDOM:
-            return 'not_calculatable'
-        elif obj.type in [ExamType.MANUAL, ExamType.BANK]:
-            return obj.exam_questions.count()
-        else:
-            return 0
+        read_only_fields = ['id', 'created']
+
+    def to_internal_value(self, data):
+        if 'years' in data and data.get('years') is None:
+            data = data.copy()
+            data['years'] = []
+        return super().to_internal_value(data)
+
+    def get_status(self, obj):
+        return 'active'
+
+    def validate(self, attrs):
+        request = self.context.get('request')
+        student = getattr(getattr(request, 'user', None), 'student', None)
+        if not student:
+            raise serializers.ValidationError('A student account is required.')
+
+        course = attrs.get('course')
+        unit = attrs.get('unit')
+        category = attrs.get('category')
+        years = attrs.get('years') or []
+        attrs['years'] = years
+        if not course or not course.is_active:
+            raise serializers.ValidationError({'course': 'An active course is required.'})
+        if not student_has_course_access(student, course):
+            raise serializers.ValidationError(
+                {'course': 'You need an active subscription for this course.'}
+            )
+        if unit and (unit.course_id != course.id or not unit.is_active):
+            raise serializers.ValidationError(
+                {'unit': 'The unit must be active and belong to the selected course.'}
+            )
+
+        difficulty_counts = {
+            DifficultyLevel.EASY: attrs.get('easy_questions_count', 0),
+            DifficultyLevel.MEDIUM: attrs.get('medium_questions_count', 0),
+            DifficultyLevel.HARD: attrs.get('hard_questions_count', 0),
+        }
+        if sum(difficulty_counts.values()) != attrs.get('number_of_questions'):
+            raise serializers.ValidationError(
+                'The easy, medium, and hard counts must equal number_of_questions.'
+            )
+
+        selected_ids, missing = select_exam_question_ids(
+            course=course,
+            unit=unit,
+            category=category,
+            years=years,
+            difficulty_counts=difficulty_counts,
+        )
+        if missing:
+            raise serializers.ValidationError(
+                {'questions': 'Not enough matching active MCQ questions.', 'availability': missing}
+            )
+        attrs['_selected_question_ids'] = selected_ids
+        attrs['_student'] = student
+        return attrs
+
+    @transaction.atomic
+    def create(self, validated_data):
+        selected_ids = validated_data.pop('_selected_question_ids')
+        student = validated_data.pop('_student')
+        years = validated_data.pop('years', [])
+        exam = Exam.objects.create(student=student, **validated_data)
+        exam.years.set(years)
+        ExamQuestion.objects.bulk_create([
+            ExamQuestion(exam=exam, question_id=question_id, order=index)
+            for index, question_id in enumerate(selected_ids, start=1)
+        ])
+        return exam
     
     def get_has_passed_exam(self, obj):
         request = self.context.get("request")
@@ -57,26 +145,8 @@ class ExamSerializer(serializers.ModelSerializer):
             student = request.user.student
         except AttributeError:
             return True
-        related_course = obj.course or (obj.unit.course if obj.unit else None)
-        if not related_course:
-            return True
-
-        # Get all dependent exams in the same course with a lower order
-        dependent_exams = Exam.objects.filter(
-            course=related_course,
-            order__lt=obj.order,
-            is_depends=True
-        )
-
-        if not dependent_exams.exists():
-            return True
-
-        for exam in dependent_exams:
-            result = Result.objects.filter(student=student, exam=exam).first()
-            if not result or not result.is_succeeded:
-                return False
-
-        return True
+        result = Result.objects.filter(student=student, exam=obj).first()
+        return bool(result and result.is_succeeded)
 
     
     
@@ -116,6 +186,7 @@ class QuestionSerializerWithoutCorrectAnswer(serializers.ModelSerializer):
     images = QuestionImageSerializer(many=True, read_only=True)
     explanation_video_url = StoredFileField(read_only=True)
     years = serializers.SerializerMethodField()
+    points = serializers.SerializerMethodField()
 
     class Meta:
         model = Question
@@ -123,6 +194,9 @@ class QuestionSerializerWithoutCorrectAnswer(serializers.ModelSerializer):
 
     def get_years(self, obj):
         return [{"id": y.id, "value": y.value} for y in obj.years.all()]
+
+    def get_points(self, obj):
+        return 1 if self.context.get('main_exam') else obj.points
 
 class AnswerSerializerWithCorrectAnswer(serializers.ModelSerializer):
     class Meta:
@@ -134,6 +208,7 @@ class QuestionSerializerWithCorrectAnswer(serializers.ModelSerializer):
     images = QuestionImageSerializer(many=True, read_only=True)
     explanation_video_url = StoredFileField(read_only=True)
     years = serializers.SerializerMethodField()
+    points = serializers.SerializerMethodField()
 
     class Meta:
         model = Question
@@ -141,6 +216,9 @@ class QuestionSerializerWithCorrectAnswer(serializers.ModelSerializer):
 
     def get_years(self, obj):
         return [{"id": y.id, "value": y.value} for y in obj.years.all()]
+
+    def get_points(self, obj):
+        return 1 if self.context.get('main_exam') else obj.points
 
 
 class StudentExamResultSerializer(serializers.ModelSerializer):
@@ -248,7 +326,7 @@ class StudentExamResultSerializer(serializers.ModelSerializer):
             'submitted_at': trial.student_submitted_exam_at,
             'submitted_by_unsubscribed_user': trial.submitted_by_unsubscribed_user,
             # 'submit_type': trial.submit_type,  # Commented out
-            'is_passed': trial.score >= (obj.exam.passing_percent / 100) * trial.exam_score
+            'is_passed': trial.score >= (Exam.PASSING_PERCENT / 100) * trial.exam_score
         } for trial in last_trials]
 
     def get_exam_score(self, obj):
@@ -266,7 +344,7 @@ class StudentExamResultSerializer(serializers.ModelSerializer):
             return "غير مسموح بعد"
         active_trial = self._get_active_trial(obj)
         if active_trial:
-            return active_trial.score >= (obj.exam.passing_percent / 100) * active_trial.exam_score
+            return active_trial.score >= (Exam.PASSING_PERCENT / 100) * active_trial.exam_score
         return False
 
     # def get_correct_questions_count(self, obj):  # Commented out
@@ -285,10 +363,7 @@ class StudentExamResultSerializer(serializers.ModelSerializer):
     #     return self._get_submission_counts(obj)['unsolved']
     
     def get_number_of_questions(self, obj):
-        if obj.exam.type == ExamType.RANDOM and obj.exam_model:
-            return getattr(obj.exam_model, 'model_questions', []).count() if hasattr(obj.exam_model, 'model_questions') else 0
-        else:
-            return len([eq for eq in obj.exam.exam_questions.all() if eq.question.is_active])
+        return len(list(obj.exam.exam_questions.all()))
 
     def get_student_started_exam_at(self, obj):
         active_trial = self._get_active_trial(obj)

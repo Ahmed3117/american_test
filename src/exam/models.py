@@ -1,11 +1,8 @@
 from django.db import models
 from django.utils.translation import gettext_lazy as _
-from django.utils import timezone
 from django.core.exceptions import ValidationError
-from django.db.models import Sum
 from course.models import Course, Unit
 from student.models import Student
-from django.utils.timezone import now
 import random
 
 
@@ -33,141 +30,121 @@ class QuestionType(models.TextChoices):
     ESSAY = 'ESSAY', _('Essay Question')
 
 class Exam(models.Model):
-    title = models.CharField(max_length=120)
-    description = models.TextField(null=True, blank=True)
-    related_to = models.CharField(max_length=10, choices=RelatedToChoices.choices)
+    """A randomized MCQ exam created and owned by a student."""
 
+    PASSING_PERCENT = 50
+
+    student = models.ForeignKey(
+        Student,
+        on_delete=models.CASCADE,
+        related_name='exams',
+        null=True,
+        blank=True,
+        db_index=True,
+    )
+    title = models.CharField(max_length=120)
     course = models.ForeignKey(
         Course, on_delete=models.CASCADE, related_name='exams', null=True, blank=True
     )
     unit = models.ForeignKey(
         Unit, on_delete=models.CASCADE, related_name='exams', null=True, blank=True
     )
-    
+    category = models.ForeignKey(
+        'QuestionCategory',
+        on_delete=models.SET_NULL,
+        related_name='exams',
+        null=True,
+        blank=True,
+    )
+    years = models.ManyToManyField('Year', related_name='exams', blank=True)
     number_of_questions = models.PositiveIntegerField(default=1)
     time_limit = models.PositiveIntegerField(help_text="Time limit in minutes")
-    score = models.FloatField(default=0.0)
-    passing_percent = models.PositiveIntegerField(default=50)
     created = models.DateTimeField(auto_now_add=True)
-    start = models.DateTimeField()
-    end = models.DateTimeField()
-    number_of_allowed_trials = models.PositiveIntegerField(default=1)
-    
-    type = models.CharField(
-        max_length=10, choices=ExamType.choices, default=ExamType.MANUAL
-    )
-    
     easy_questions_count = models.PositiveIntegerField(default=0)
     medium_questions_count = models.PositiveIntegerField(default=0)
     hard_questions_count = models.PositiveIntegerField(default=0)
-    show_answers_after_finish = models.BooleanField(default=False)
-    order = models.PositiveIntegerField(default=0)
-    is_active = models.BooleanField(default=True)
-    allow_unsubscribed_access = models.BooleanField(
-        default=False,
-        help_text="Allow students without an active subscription to take this exam.",
-    )
-    allow_show_results_at = models.DateTimeField(default=timezone.now)
-    allow_show_answers_at = models.DateTimeField(null=True, blank=True)
-    is_depends = models.BooleanField(default=False)
-    show_questions_in_random = models.BooleanField(default=True)
-    ponus = models.IntegerField(default=0)
-    ponus_option = models.CharField(max_length=30, choices=PonusOption.choices, null=True, blank=True)
 
     def clean(self):
         super().clean()
-        if self.easy_questions_count + self.medium_questions_count + self.hard_questions_count > self.number_of_questions:
-            raise ValidationError(_("The total count of questions cannot exceed the number of questions."))
-        if self.related_to == RelatedToChoices.COURSE and not self.course:
-            raise ValidationError(_("Course is required when related to course."))
-        if self.related_to == RelatedToChoices.UNIT and not self.unit:
-            raise ValidationError(_("Unit is required when related to unit."))
-        if self.related_to == RelatedToChoices.COURSE and self.unit:
-            raise ValidationError(_("A course exam cannot also target a unit."))
-        if self.type == ExamType.RANDOM:
-            self.validate_random_exam()
-
-    def validate_random_exam(self):
-        if self.related_to == RelatedToChoices.COURSE:
-            related_queryset = Question.objects.filter(course=self.course)
-        elif self.related_to == RelatedToChoices.UNIT:
-            related_queryset = Question.objects.filter(unit=self.unit)
-        else:
-            raise ValidationError(_("Exam must be related to either a course or a unit."))
-
-        easy_count = related_queryset.filter(difficulty=DifficultyLevel.EASY).count()
-        medium_count = related_queryset.filter(difficulty=DifficultyLevel.MEDIUM).count()
-        hard_count = related_queryset.filter(difficulty=DifficultyLevel.HARD).count()
-
-        if self.easy_questions_count > easy_count:
-            raise ValidationError(_("Not enough easy questions available for the selected count."))
-        if self.medium_questions_count > medium_count:
-            raise ValidationError(_("Not enough medium questions available for the selected count."))
-        if self.hard_questions_count > hard_count:
-            raise ValidationError(_("Not enough hard questions available for the selected count."))
+        if not self.course_id:
+            raise ValidationError(_("Course is required."))
+        selected_count = (
+            self.easy_questions_count
+            + self.medium_questions_count
+            + self.hard_questions_count
+        )
+        if selected_count != self.number_of_questions:
+            raise ValidationError(
+                _("The easy, medium, and hard counts must equal the number of questions.")
+            )
+        if self.unit_id and self.course_id and self.unit.course_id != self.course_id:
+            raise ValidationError(_("The selected unit must belong to the selected course."))
 
     def status(self):
-        if self.start > timezone.now():
-            return 'soon'
-        if self.end < timezone.now():
-            return 'finished'
         return 'active'
 
     def get_related_name(self) -> str:
-        if self.related_to == "COURSE" and self.course:
-            return self.course.name
-        if self.related_to == "UNIT" and self.unit:
-            return self.unit.name
-        return ""
+        return self.unit.name if self.unit else (self.course.name if self.course else "")
 
     def get_related_course(self):
-        if self.course:
-            return self.course.id
-        if self.unit:
-            return self.unit.course_id
-        return None
+        return self.course_id
 
     def calculate_score(self):
-        if self.type == ExamType.RANDOM:
-            return 'not_calculatable'
-        elif self.type in [ExamType.MANUAL, ExamType.BANK]:
-            total_score = self.exam_questions.aggregate(total=Sum('question__points'))['total'] or 0
-            return total_score
-        else:
-            return 0
+        return self.exam_questions.filter(is_active=True).count()
 
     def calculate_number_of_questions(self):
-        if self.type == ExamType.RANDOM:
-            return 'not_calculatable'
-        elif self.type in [ExamType.MANUAL, ExamType.BANK]:
-            return self.exam_questions.count()
-        else:
-            return 0
+        return self.exam_questions.filter(is_active=True).count()
 
-    def save(self, *args, **kwargs):
-        # assign related course before save
-        if self.unit:
-            self.course = self.unit.course
-        elif self.related_to == RelatedToChoices.UNIT:
-            self.course = None
+    @property
+    def score(self):
+        return self.number_of_questions
 
-        # auto-order logic
-        if not self.pk and self.order == 0:
-            if self.course:
-                qs = Exam.objects.filter(course=self.course)
-            else:
-                qs = Exam.objects.none()
-
-            last_order = qs.aggregate(models.Max("order"))["order__max"]
-            self.order = (last_order or 0) + 1
-
-        super().save(*args, **kwargs)
+    @property
+    def passing_percent(self):
+        return self.PASSING_PERCENT
 
     def __str__(self):
         return self.title
 
     class Meta:
-        ordering = ['order','created']
+        ordering = ['-created', '-id']
+        indexes = [
+            models.Index(fields=['student', 'created']),
+            models.Index(fields=['student', 'course', 'created']),
+        ]
+
+
+class ExamConfig(models.Model):
+    """Global limits for newly started main-exam trials."""
+
+    max_trials_per_day = models.PositiveIntegerField(default=3)
+    max_trials_per_week = models.PositiveIntegerField(default=21)
+    max_trials_per_month = models.PositiveIntegerField(default=90)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(condition=models.Q(id=1), name='single_exam_config'),
+        ]
+
+    @classmethod
+    def load(cls):
+        config, _ = cls.objects.get_or_create(pk=1)
+        return config
+
+    def clean(self):
+        super().clean()
+        if self.max_trials_per_day > self.max_trials_per_week:
+            raise ValidationError(_("The weekly limit cannot be less than the daily limit."))
+        if self.max_trials_per_week > self.max_trials_per_month:
+            raise ValidationError(_("The monthly limit cannot be less than the weekly limit."))
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return "Main exam trial limits"
 
 class QuestionCategory(models.Model):
     title = models.CharField(max_length=200)
@@ -243,6 +220,10 @@ class Question(models.Model):
             models.Index(fields=['id', 'is_active', 'question_type']),
             # For course/unit/category based filtering with active/type checks
             models.Index(fields=['course', 'is_active', 'question_type']),
+            models.Index(
+                fields=['course', 'is_active', 'question_type', 'difficulty'],
+                name='exam_quest_course_diff_idx',
+            ),
             models.Index(fields=['unit', 'is_active', 'question_type']),
             models.Index(fields=['category', 'is_active', 'question_type']),
         ]
@@ -432,11 +413,7 @@ class Result(models.Model):
 
     @property
     def is_trials_finished(self):
-        """Check if the student has finished his allowed trials."""
-        # If all trials are submitted, check if we reached the limit
-        if not self.trials.filter(student_submitted_exam_at__isnull=True).exists():
-            return self.trial >= self.exam.number_of_allowed_trials
-        # If there's an unsubmitted trial, trials are not finished
+        """Main exams have no lifetime limit; calendar quotas reset over time."""
         return False
 
     @property
@@ -449,18 +426,16 @@ class Result(models.Model):
         """Determine if the student passed the exam based on the active trial."""
         active_trial = self.active_trial
         if active_trial:
-            return active_trial.score >= (self.exam.passing_percent / 100) * active_trial.exam_score
+            return active_trial.score >= (Exam.PASSING_PERCENT / 100) * active_trial.exam_score
         return False
 
     @property
     def is_allowed_to_show_result(self):
-        return timezone.now() >= self.exam.allow_show_results_at
+        return True
 
     @property
     def is_allowed_to_show_answers(self):
-        if self.exam.allow_show_answers_at:
-            return timezone.now() >= self.exam.allow_show_answers_at
-        return self.exam.show_answers_after_finish
+        return True
 
     def get_best_trial_score(self):
         """
