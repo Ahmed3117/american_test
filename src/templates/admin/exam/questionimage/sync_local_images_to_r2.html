@@ -1,0 +1,68 @@
+{% extends "admin/base_site.html" %}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Home</a>
+    &rsaquo; <a href="{{ question_image_changelist_url }}">Question images</a>
+    &rsaquo; Sync local images to R2
+  </div>
+{% endblock %}
+
+{% block content %}
+  <p>
+    This copies files from <code>{{ media_root }}/questions/</code> to the
+    <strong>{{ bucket_name|default:"unconfigured" }}</strong> R2 bucket using
+    the same <code>questions/...</code> object keys.
+  </p>
+  <ul>
+    <li>Local question image files: {{ local_count }}</li>
+    <li>Maximum files per request: {{ batch_size }}</li>
+    <li>Existing R2 files are skipped and never deleted.</li>
+  </ul>
+
+  {% if not r2_is_active %}
+    <p class="errornote">
+      R2 is not active. Set <code>R2_STORAGE_BUCKET_NAME</code> and the other R2
+      settings, then restart Django before running this sync.
+    </p>
+  {% elif result %}
+    <h2>Latest batch</h2>
+    <ul>
+      <li>Already in R2: {{ result.already_in_r2 }}</li>
+      <li>Attempted in this batch: {{ result.attempted }}</li>
+      <li>Uploaded in this batch: {{ result.uploaded }}</li>
+      <li>Still missing: {{ result.remaining }}</li>
+    </ul>
+
+    {% if result.failed %}
+      <p class="errornote">The automatic sync stopped because some files failed.</p>
+      <ul>
+        {% for failure in result.failed %}
+          <li><code>{{ failure.key }}</code>: {{ failure.error }}</li>
+        {% endfor %}
+      </ul>
+    {% elif result.remaining == 0 %}
+      <p class="success">All local question images exist in R2.</p>
+    {% endif %}
+  {% endif %}
+
+  {% if r2_is_active and local_count %}
+    <form method="post" id="r2-sync-form">
+      {% csrf_token %}
+      <input type="hidden" name="confirm" value="yes">
+      <input type="submit" value="{% if result and result.remaining %}Sync next batch{% else %}Start sync{% endif %}">
+      <a href="{{ question_image_changelist_url }}" class="button cancel-link">Return to question images</a>
+    </form>
+  {% else %}
+    <a href="{{ question_image_changelist_url }}" class="button">Return to question images</a>
+  {% endif %}
+
+  {% if result.auto_continue %}
+    <p>Continuing automatically with the next batch…</p>
+    <script>
+      window.setTimeout(function () {
+        document.getElementById('r2-sync-form').submit();
+      }, 500);
+    </script>
+  {% endif %}
+{% endblock %}

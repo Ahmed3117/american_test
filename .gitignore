@@ -28,6 +28,9 @@ env/
 .env.production
 *.env
 
+# Local copies of production configuration and data
+/prod_data/
+
 # IDE
 .vscode/
 .idea/
@@ -76,15 +79,28 @@ old_*/
 **/*.json
 **/*.md
 !src/docs/UNSUBSCRIBED_EXAM_API.md
+!src/docs/QUESTION_EXPLANATION_VIDEO_R2_API.md
+!src/docs/STUDENT_CREATED_MAIN_EXAMS_API.md
+!src/docs/American_TEST_focused_api.postman_collection.json
 
 # Migration files
 **/migrations/
+!src/exam/migrations/
+src/exam/migrations/*
+!src/exam/migrations/0010_examconfig_alter_exam_options_and_more.py
 
 # Test files
 tests.py
 test_script.py
 **/test_*.py
 **/*_tests.py
+!src/exam/tests_student_main_exam.py
+!src/exam/test_explanation_video_upload.py
+!src/exam/test_admin_detach_questions.py
+!src/exam/test_admin_media_sync.py
+!src/core/test_storage_settings.py
+!src/dashboard/test_top_student_results.py
+!src/dashboard/test_recent_features_full_flow.py
 
 # Temporary files
 temp/

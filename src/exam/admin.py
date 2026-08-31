@@ -1,7 +1,14 @@
+from pathlib import Path
+
+from django.conf import settings
 from django.contrib import admin, messages
 from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
+from django.core.exceptions import PermissionDenied
+from django.core.files import File
+from django.core.files.storage import storages
 from django.db import transaction
 from django.template.response import TemplateResponse
+from django.urls import path, reverse
 
 from exam.models import StudentBank, TempExam, TempExamAllowedTimes, Answer, EssaySubmission, Exam, ExamConfig, ExamModelQuestion, ExamQuestion, Question, QuestionCategory, QuestionImage, RandomExamBank, Result, ResultTrial, Submission, AdminQuestionBank, StudentCreatedExam, Year
 
@@ -37,6 +44,162 @@ class QuestionImageAdmin(admin.ModelAdmin):
     list_filter = ('question__course', 'question__unit')
     search_fields = ('question__text', 'image')
     ordering = ('question', 'order', 'id')
+    change_list_template = 'admin/exam/questionimage/change_list.html'
+    r2_sync_batch_size = 25
+
+    def has_sync_local_images_to_r2_permission(self, request):
+        return request.user.is_active and request.user.is_staff and request.user.is_superuser
+
+    def changelist_view(self, request, extra_context=None):
+        extra_context = {
+            **(extra_context or {}),
+            'show_sync_local_images_to_r2': self.has_sync_local_images_to_r2_permission(request),
+        }
+        return super().changelist_view(request, extra_context=extra_context)
+
+    def get_urls(self):
+        custom_urls = [
+            path(
+                'sync-local-images-to-r2/',
+                self.admin_site.admin_view(self.sync_local_images_to_r2_view),
+                name='exam_questionimage_sync_local_images_to_r2',
+            ),
+        ]
+        return custom_urls + super().get_urls()
+
+    @staticmethod
+    def _local_question_image_files():
+        """Return safe local files and their storage keys under questions/."""
+        media_root = Path(settings.MEDIA_ROOT).resolve()
+        questions_root = media_root / 'questions'
+        if not questions_root.is_dir():
+            return media_root, []
+
+        files = []
+        for local_path in questions_root.rglob('*'):
+            if local_path.is_symlink() or not local_path.is_file():
+                continue
+            try:
+                resolved_path = local_path.resolve()
+                resolved_path.relative_to(media_root)
+            except (OSError, ValueError):
+                continue
+            files.append((resolved_path.relative_to(media_root).as_posix(), resolved_path))
+        return media_root, sorted(files, key=lambda item: item[0])
+
+    @staticmethod
+    def _build_r2_sync_storage():
+        """Create an exact-key R2 storage without changing the global backend."""
+        storage_config = dict(settings.STORAGES['default'])
+        storage_options = dict(storage_config.get('OPTIONS', {}))
+        storage_options['file_overwrite'] = True
+        storage_config['OPTIONS'] = storage_options
+        return storages.create_storage(storage_config)
+
+    @staticmethod
+    def _existing_r2_question_keys(storage):
+        """List R2 keys once per batch instead of issuing one HEAD per file."""
+        client = storage.connection.meta.client
+        paginator = client.get_paginator('list_objects_v2')
+        pages = paginator.paginate(
+            Bucket=storage.bucket_name,
+            Prefix='questions/',
+        )
+        return {
+            item['Key']
+            for page in pages
+            for item in page.get('Contents', [])
+        }
+
+    def sync_local_images_to_r2_view(self, request):
+        """Upload missing MEDIA_ROOT/questions files to R2 in safe batches."""
+        if not self.has_sync_local_images_to_r2_permission(request):
+            raise PermissionDenied
+
+        media_root, local_files = self._local_question_image_files()
+        bucket_name = getattr(settings, 'R2_STORAGE_BUCKET_NAME', '')
+        r2_is_active = (
+            getattr(settings, 'MEDIA_STORAGE_BACKEND', None) == 'r2'
+            and bool(bucket_name)
+        )
+        result = None
+
+        if request.method == 'POST' and request.POST.get('confirm') == 'yes':
+            if not r2_is_active or not bucket_name:
+                self.message_user(
+                    request,
+                    'R2 is not active. Configure R2_STORAGE_BUCKET_NAME and restart Django first.',
+                    level=messages.ERROR,
+                )
+            else:
+                try:
+                    storage = self._build_r2_sync_storage()
+                    existing_keys = self._existing_r2_question_keys(storage)
+                except Exception as exc:
+                    self.message_user(
+                        request,
+                        f'Could not read the R2 bucket: {exc}',
+                        level=messages.ERROR,
+                    )
+                else:
+                    missing_files = [item for item in local_files if item[0] not in existing_keys]
+                    current_batch = missing_files[:self.r2_sync_batch_size]
+                    uploaded_keys = []
+                    failed_files = []
+
+                    for storage_key, local_path in current_batch:
+                        try:
+                            with local_path.open('rb') as local_file:
+                                saved_key = storage.save(
+                                    storage_key,
+                                    File(local_file, name=local_path.name),
+                                )
+                            if saved_key != storage_key:
+                                raise RuntimeError(
+                                    f'R2 returned unexpected object key {saved_key!r}'
+                                )
+                        except Exception as exc:
+                            failed_files.append({
+                                'key': storage_key,
+                                'error': str(exc)[:300],
+                            })
+                        else:
+                            uploaded_keys.append(storage_key)
+
+                    remaining_count = len(missing_files) - len(uploaded_keys)
+                    result = {
+                        'already_in_r2': len(local_files) - len(missing_files),
+                        'attempted': len(current_batch),
+                        'uploaded': len(uploaded_keys),
+                        'failed': failed_files,
+                        'remaining': remaining_count,
+                        'auto_continue': remaining_count > 0 and not failed_files,
+                    }
+                    if remaining_count == 0:
+                        self.message_user(
+                            request,
+                            'All local question images now exist in R2.',
+                            level=messages.SUCCESS,
+                        )
+
+        context = {
+            **self.admin_site.each_context(request),
+            'title': 'Sync local question images to R2',
+            'opts': self.model._meta,
+            'media_root': media_root,
+            'local_count': len(local_files),
+            'bucket_name': bucket_name,
+            'r2_is_active': r2_is_active,
+            'batch_size': self.r2_sync_batch_size,
+            'result': result,
+            'question_image_changelist_url': reverse('admin:exam_questionimage_changelist'),
+        }
+        request.current_app = self.admin_site.name
+        return TemplateResponse(
+            request,
+            'admin/exam/questionimage/sync_local_images_to_r2.html',
+            context,
+        )
 
 
 @admin.register(Exam)
