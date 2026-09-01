@@ -45,14 +45,19 @@ class QuestionAdmin(admin.ModelAdmin):
     search_fields = ('text', 'answers__text')
     inlines = (QuestionImageInline,)
     change_list_template = 'admin/exam/question/change_list.html'
+    r2_audio_sync_batch_size = 25
 
     def has_add_all_questions_to_exam_permission(self, request):
+        return request.user.is_active and request.user.is_staff and request.user.is_superuser
+
+    def has_sync_local_audio_to_r2_permission(self, request):
         return request.user.is_active and request.user.is_staff and request.user.is_superuser
 
     def changelist_view(self, request, extra_context=None):
         extra_context = {
             **(extra_context or {}),
             'show_add_all_questions_to_exam': self.has_add_all_questions_to_exam_permission(request),
+            'show_sync_local_audio_to_r2': self.has_sync_local_audio_to_r2_permission(request),
         }
         return super().changelist_view(request, extra_context=extra_context)
 
@@ -63,8 +68,147 @@ class QuestionAdmin(admin.ModelAdmin):
                 self.admin_site.admin_view(self.add_all_questions_to_exam_view),
                 name='exam_question_add_all_to_exam',
             ),
+            path(
+                'sync-local-explanation-audio-to-r2/',
+                self.admin_site.admin_view(self.sync_local_audio_to_r2_view),
+                name='exam_question_sync_local_audio_to_r2',
+            ),
         ]
         return custom_urls + super().get_urls()
+
+    @staticmethod
+    def _local_question_audio_files():
+        """Return safe local files and exact keys under question_explanations/audio/."""
+        media_root = Path(settings.MEDIA_ROOT).resolve()
+        audio_root = media_root / 'question_explanations' / 'audio'
+        if not audio_root.is_dir():
+            return media_root, []
+
+        files = []
+        for local_path in audio_root.rglob('*'):
+            if local_path.is_symlink() or not local_path.is_file():
+                continue
+            try:
+                resolved_path = local_path.resolve()
+                resolved_path.relative_to(media_root)
+            except (OSError, ValueError):
+                continue
+            files.append((resolved_path.relative_to(media_root).as_posix(), resolved_path))
+        return media_root, sorted(files, key=lambda item: item[0])
+
+    @staticmethod
+    def _build_r2_audio_sync_storage():
+        """Create an exact-key R2 storage without changing the global backend."""
+        storage_config = dict(settings.STORAGES['default'])
+        storage_options = dict(storage_config.get('OPTIONS', {}))
+        storage_options['file_overwrite'] = True
+        storage_config['OPTIONS'] = storage_options
+        return storages.create_storage(storage_config)
+
+    @staticmethod
+    def _existing_r2_audio_keys(storage):
+        """List audio keys once per batch instead of issuing one HEAD per file."""
+        client = storage.connection.meta.client
+        paginator = client.get_paginator('list_objects_v2')
+        pages = paginator.paginate(
+            Bucket=storage.bucket_name,
+            Prefix='question_explanations/audio/',
+        )
+        return {
+            item['Key']
+            for page in pages
+            for item in page.get('Contents', [])
+        }
+
+    def sync_local_audio_to_r2_view(self, request):
+        """Upload missing local question explanation audio to R2 in safe batches."""
+        if not self.has_sync_local_audio_to_r2_permission(request):
+            raise PermissionDenied
+
+        media_root, local_files = self._local_question_audio_files()
+        bucket_name = getattr(settings, 'R2_STORAGE_BUCKET_NAME', '')
+        r2_is_active = (
+            getattr(settings, 'MEDIA_STORAGE_BACKEND', None) == 'r2'
+            and bool(bucket_name)
+        )
+        result = None
+
+        if request.method == 'POST' and request.POST.get('confirm') == 'yes':
+            if not r2_is_active or not bucket_name:
+                self.message_user(
+                    request,
+                    'R2 is not active. Configure R2_STORAGE_BUCKET_NAME and restart Django first.',
+                    level=messages.ERROR,
+                )
+            else:
+                try:
+                    storage = self._build_r2_audio_sync_storage()
+                    existing_keys = self._existing_r2_audio_keys(storage)
+                except Exception as exc:
+                    self.message_user(
+                        request,
+                        f'Could not read the R2 bucket: {exc}',
+                        level=messages.ERROR,
+                    )
+                else:
+                    missing_files = [item for item in local_files if item[0] not in existing_keys]
+                    current_batch = missing_files[:self.r2_audio_sync_batch_size]
+                    uploaded_keys = []
+                    failed_files = []
+
+                    for storage_key, local_path in current_batch:
+                        try:
+                            with local_path.open('rb') as local_file:
+                                saved_key = storage.save(
+                                    storage_key,
+                                    File(local_file, name=local_path.name),
+                                )
+                            if saved_key != storage_key:
+                                raise RuntimeError(
+                                    f'R2 returned unexpected object key {saved_key!r}'
+                                )
+                        except Exception as exc:
+                            failed_files.append({
+                                'key': storage_key,
+                                'error': str(exc)[:300],
+                            })
+                        else:
+                            uploaded_keys.append(storage_key)
+
+                    remaining_count = len(missing_files) - len(uploaded_keys)
+                    result = {
+                        'already_in_r2': len(local_files) - len(missing_files),
+                        'attempted': len(current_batch),
+                        'uploaded': len(uploaded_keys),
+                        'failed': failed_files,
+                        'remaining': remaining_count,
+                        'auto_continue': remaining_count > 0 and not failed_files,
+                    }
+                    if remaining_count == 0:
+                        self.message_user(
+                            request,
+                            'All local question explanation audio files now exist in R2.',
+                            level=messages.SUCCESS,
+                        )
+
+        context = {
+            **self.admin_site.each_context(request),
+            'title': 'Sync local question explanation audio to R2',
+            'opts': self.model._meta,
+            'media_root': media_root,
+            'local_count': len(local_files),
+            'bucket_name': bucket_name,
+            'r2_is_active': r2_is_active,
+            'batch_size': self.r2_audio_sync_batch_size,
+            'result': result,
+            'question_changelist_url': reverse('admin:exam_question_changelist'),
+        }
+        request.current_app = self.admin_site.name
+        return TemplateResponse(
+            request,
+            'admin/exam/question/sync_local_audio_to_r2.html',
+            context,
+        )
 
     @staticmethod
     def _add_all_questions_preview(exam):

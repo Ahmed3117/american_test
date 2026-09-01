@@ -8,5 +8,12 @@
       </a>
     </li>
   {% endif %}
+  {% if show_sync_local_audio_to_r2 %}
+    <li>
+      <a href="{% url 'admin:exam_question_sync_local_audio_to_r2' %}">
+        Sync local explanation audio to R2
+      </a>
+    </li>
+  {% endif %}
   {{ block.super }}
 {% endblock %}

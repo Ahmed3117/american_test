@@ -47,10 +47,21 @@ class QuestionSerializer(serializers.ModelSerializer):
     answers = AnswerSerializer(many=True, required=False)
     images = QuestionImageSerializer(many=True, read_only=True)
     explanation_video_url = StoredFileField(required=False, allow_null=True)
-    years = serializers.PrimaryKeyRelatedField(
-        many=True,
-        queryset=Year.objects.all(),
+    course_name = serializers.CharField(
+        source="course.name", read_only=True, default=None
+    )
+    unit_name = serializers.CharField(
+        source="unit.name", read_only=True, default=None
+    )
+    category_name = serializers.CharField(
+        source="category.title", read_only=True, default=None
+    )
+    years = serializers.ManyRelatedField(
+        child_relation=serializers.PrimaryKeyRelatedField(
+            queryset=Year.objects.all(),
+        ),
         required=False,
+        allow_null=True,
     )
 
     class Meta:
@@ -65,8 +76,11 @@ class QuestionSerializer(serializers.ModelSerializer):
             "points",
             "difficulty",
             "category",
+            "category_name",
             "course",
+            "course_name",
             "unit",
+            "unit_name",
             "is_active",
             "answers",
             "question_type",
@@ -79,14 +93,9 @@ class QuestionSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         if self.instance is None and "is_active" not in getattr(self, "initial_data", {}):
             attrs["is_active"] = True
-        course = attrs.get("course", getattr(self.instance, "course", None))
         unit = attrs.get("unit", getattr(self.instance, "unit", None))
         if unit:
             attrs["course"] = unit.course
-        elif not course and not self.context.get(
-            "allow_unassigned_classification", False
-        ):
-            raise serializers.ValidationError("Question must be related to a course or a unit.")
         return attrs
 
     def create(self, validated_data):

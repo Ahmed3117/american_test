@@ -189,6 +189,19 @@ def _nullable_form_value(value):
     return value
 
 
+def _normalize_question_classification(data):
+    """Normalize optional classification fields on JSON or multipart input."""
+    for field in ("course", "unit", "category"):
+        if field in data:
+            data[field] = _nullable_form_value(data.get(field))
+    if "years" in data and _nullable_form_value(data.get("years")) is None:
+        if hasattr(data, "setlist"):
+            data.setlist("years", [])
+        else:
+            data["years"] = []
+    return data
+
+
 def _question_explanation_fields(question, prefix="question_explanation"):
     if not question:
         return {
@@ -567,7 +580,9 @@ class QuestionListCreateView(generics.ListCreateAPIView):
     def create(self, request, *args, **kwargs):
         if "answers" in request.data and not _has_indexed_answers(request.data):
             return super().create(request, *args, **kwargs)
-        data = _strip_parser_artifacts(request.data)
+        data = _normalize_question_classification(
+            _strip_parser_artifacts(request.data)
+        )
         if "explanation_video_url" in request.FILES:
             data["explanation_video_url"] = request.FILES["explanation_video_url"]
         if "explanation_recorded_audio" in request.FILES:
@@ -602,7 +617,9 @@ class QuestionRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
         if "answers" in request.data and not _has_indexed_answers(request.data):
             return super().patch(request, *args, **kwargs)
 
-        data = _strip_parser_artifacts(request.data)
+        data = _normalize_question_classification(
+            _strip_parser_artifacts(request.data)
+        )
         if "explanation_video_url" in request.FILES:
             data["explanation_video_url"] = request.FILES["explanation_video_url"]
         if "explanation_recorded_audio" in request.FILES:
@@ -688,13 +705,7 @@ class BulkQuestionCreateView(generics.CreateAPIView):
                 audio_key = f"questions[{index}][explanation_recorded_audio]"
                 if audio_key in request.FILES:
                     data["explanation_recorded_audio"] = request.FILES[audio_key]
-                serializer = self.get_serializer(
-                    data=data,
-                    context={
-                        **self.get_serializer_context(),
-                        "allow_unassigned_classification": True,
-                    },
-                )
+                serializer = self.get_serializer(data=data)
                 serializer.is_valid(raise_exception=True)
                 question = serializer.save()
 
