@@ -83,7 +83,9 @@ class QuestionSerializer(serializers.ModelSerializer):
         unit = attrs.get("unit", getattr(self.instance, "unit", None))
         if unit:
             attrs["course"] = unit.course
-        elif not course:
+        elif not course and not self.context.get(
+            "allow_unassigned_classification", False
+        ):
             raise serializers.ValidationError("Question must be related to a course or a unit.")
         return attrs
 

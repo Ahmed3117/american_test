@@ -175,6 +175,20 @@ def _bool(value):
     return str(value).lower() in {"true", "1", "yes"}
 
 
+def _nullable_form_value(value):
+    """Normalize null-like FormData values for optional relation fields."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip().lower() in {
+        "",
+        "null",
+        "none",
+        "undefined",
+    }:
+        return None
+    return value
+
+
 def _question_explanation_fields(question, prefix="question_explanation"):
     if not question:
         return {
@@ -648,9 +662,15 @@ class BulkQuestionCreateView(generics.CreateAPIView):
                     "text": request.data.get(f"questions[{index}][text]"),
                     "points": request.data.get(f"questions[{index}][points]"),
                     "difficulty": request.data.get(f"questions[{index}][difficulty]"),
-                    "category": request.data.get(f"questions[{index}][category]"),
-                    "course": request.data.get(f"questions[{index}][course]"),
-                    "unit": request.data.get(f"questions[{index}][unit]"),
+                    "category": _nullable_form_value(
+                        request.data.get(f"questions[{index}][category]")
+                    ),
+                    "course": _nullable_form_value(
+                        request.data.get(f"questions[{index}][course]")
+                    ),
+                    "unit": _nullable_form_value(
+                        request.data.get(f"questions[{index}][unit]")
+                    ),
                     "question_type": request.data.get(f"questions[{index}][question_type]"),
                     "comment": request.data.get(f"questions[{index}][comment]"),
                     "explanation_text": request.data.get(
@@ -668,7 +688,13 @@ class BulkQuestionCreateView(generics.CreateAPIView):
                 audio_key = f"questions[{index}][explanation_recorded_audio]"
                 if audio_key in request.FILES:
                     data["explanation_recorded_audio"] = request.FILES[audio_key]
-                serializer = self.get_serializer(data=data)
+                serializer = self.get_serializer(
+                    data=data,
+                    context={
+                        **self.get_serializer_context(),
+                        "allow_unassigned_classification": True,
+                    },
+                )
                 serializer.is_valid(raise_exception=True)
                 question = serializer.save()
 
@@ -682,7 +708,9 @@ class BulkQuestionCreateView(generics.CreateAPIView):
                 # Accepts JSON-array string "[1,4,2]", comma-separated "1,4,2",
                 # or repeated fields. Years are looked up by ID; an unknown ID
                 # returns 400.
-                years_raw = request.data.get(f"questions[{index}][years]")
+                years_raw = _nullable_form_value(
+                    request.data.get(f"questions[{index}][years]")
+                )
                 if years_raw not in (None, ""):
                     try:
                         year_ids = _parse_year_id_list(years_raw)
