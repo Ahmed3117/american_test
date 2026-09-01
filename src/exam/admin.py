@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from django import forms
 from django.conf import settings
 from django.contrib import admin, messages
 from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
@@ -7,10 +8,12 @@ from django.core.exceptions import PermissionDenied
 from django.core.files import File
 from django.core.files.storage import storages
 from django.db import transaction
+from django.db.models import Count, Max, Q
+from django.shortcuts import redirect
 from django.template.response import TemplateResponse
 from django.urls import path, reverse
 
-from exam.models import StudentBank, TempExam, TempExamAllowedTimes, Answer, EssaySubmission, Exam, ExamConfig, ExamModelQuestion, ExamQuestion, Question, QuestionCategory, QuestionImage, RandomExamBank, Result, ResultTrial, Submission, AdminQuestionBank, StudentCreatedExam, Year
+from exam.models import StudentBank, TempExam, TempExamAllowedTimes, Answer, DifficultyLevel, EssaySubmission, Exam, ExamConfig, ExamModelQuestion, ExamQuestion, Question, QuestionCategory, QuestionImage, QuestionType, RandomExamBank, Result, ResultTrial, Submission, AdminQuestionBank, StudentCreatedExam, Year
 
 # Register your models here.
 
@@ -21,6 +24,19 @@ class QuestionImageInline(admin.TabularInline):
     readonly_fields = ('created',)
 
 
+class ExamChoiceField(forms.ModelChoiceField):
+    def label_from_instance(self, exam):
+        owner = exam.student or 'legacy / no owner'
+        return f'#{exam.pk} — {exam.title} — {owner}'
+
+
+class AddAllQuestionsToExamForm(forms.Form):
+    exam = ExamChoiceField(
+        queryset=Exam.objects.select_related('student', 'student__user').order_by('-created', '-id'),
+        label='Target exam',
+    )
+
+
 class QuestionAdmin(admin.ModelAdmin):
     list_display = ('id','text', 'points', 'difficulty', 'category', 'course', 'unit', 'is_active', 'images_count', 'created')
     list_editable = ('is_active',)
@@ -28,6 +44,141 @@ class QuestionAdmin(admin.ModelAdmin):
     filter_horizontal = ('similar_questions', 'years')
     search_fields = ('text', 'answers__text')
     inlines = (QuestionImageInline,)
+    change_list_template = 'admin/exam/question/change_list.html'
+
+    def has_add_all_questions_to_exam_permission(self, request):
+        return request.user.is_active and request.user.is_staff and request.user.is_superuser
+
+    def changelist_view(self, request, extra_context=None):
+        extra_context = {
+            **(extra_context or {}),
+            'show_add_all_questions_to_exam': self.has_add_all_questions_to_exam_permission(request),
+        }
+        return super().changelist_view(request, extra_context=extra_context)
+
+    def get_urls(self):
+        custom_urls = [
+            path(
+                'add-all-to-exam/',
+                self.admin_site.admin_view(self.add_all_questions_to_exam_view),
+                name='exam_question_add_all_to_exam',
+            ),
+        ]
+        return custom_urls + super().get_urls()
+
+    @staticmethod
+    def _add_all_questions_preview(exam):
+        question_stats = Question.objects.aggregate(
+            total=Count('id'),
+            active=Count('id', filter=Q(is_active=True)),
+            mcq=Count('id', filter=Q(question_type=QuestionType.MCQ)),
+            essay=Count('id', filter=Q(question_type=QuestionType.ESSAY)),
+        )
+        linked_question_count = (
+            ExamQuestion.objects
+            .filter(exam=exam)
+            .values('question_id')
+            .distinct()
+            .count()
+        )
+        return {
+            'exam': exam,
+            **question_stats,
+            'inactive': question_stats['total'] - question_stats['active'],
+            'already_linked': linked_question_count,
+            'to_add': max(question_stats['total'] - linked_question_count, 0),
+            'inactive_links_to_reactivate': ExamQuestion.objects.filter(
+                exam=exam,
+                is_active=False,
+            ).count(),
+            'existing_trials': ResultTrial.objects.filter(result__exam=exam).count(),
+        }
+
+    @staticmethod
+    @transaction.atomic
+    def _attach_all_questions(exam_id):
+        exam = Exam.objects.select_for_update().get(pk=exam_id)
+        question_ids = list(
+            Question.objects.order_by('id').values_list('id', flat=True)
+        )
+        relations = ExamQuestion.objects.filter(exam=exam)
+        existing_question_ids = set(relations.values_list('question_id', flat=True))
+        reactivated_count = relations.filter(is_active=False).update(is_active=True)
+        next_order = (relations.aggregate(max_order=Max('order'))['max_order'] or 0) + 1
+        missing_question_ids = [
+            question_id
+            for question_id in question_ids
+            if question_id not in existing_question_ids
+        ]
+        ExamQuestion.objects.bulk_create(
+            [
+                ExamQuestion(
+                    exam=exam,
+                    question_id=question_id,
+                    is_active=True,
+                    order=next_order + offset,
+                )
+                for offset, question_id in enumerate(missing_question_ids)
+            ],
+            batch_size=1000,
+        )
+
+        active_relations = ExamQuestion.objects.filter(exam=exam, is_active=True)
+        counters = active_relations.aggregate(
+            total=Count('id'),
+            easy=Count('id', filter=Q(question__difficulty=DifficultyLevel.EASY)),
+            medium=Count('id', filter=Q(question__difficulty=DifficultyLevel.MEDIUM)),
+            hard=Count('id', filter=Q(question__difficulty=DifficultyLevel.HARD)),
+        )
+        Exam.objects.filter(pk=exam.pk).update(
+            number_of_questions=counters['total'],
+            easy_questions_count=counters['easy'],
+            medium_questions_count=counters['medium'],
+            hard_questions_count=counters['hard'],
+        )
+        return {
+            'exam': exam,
+            'added': len(missing_question_ids),
+            'reactivated': reactivated_count,
+            'total': counters['total'],
+        }
+
+    def add_all_questions_to_exam_view(self, request):
+        if not self.has_add_all_questions_to_exam_permission(request):
+            raise PermissionDenied
+
+        form = AddAllQuestionsToExamForm(request.POST or None)
+        preview = None
+        if request.method == 'POST' and form.is_valid():
+            exam = form.cleaned_data['exam']
+            if request.POST.get('confirm') == 'yes':
+                result = self._attach_all_questions(exam.pk)
+                self.message_user(
+                    request,
+                    (
+                        f"Added {result['added']} question link(s), reactivated "
+                        f"{result['reactivated']}, and set exam #{exam.pk} to "
+                        f"{result['total']} active question relation(s)."
+                    ),
+                    level=messages.SUCCESS,
+                )
+                return redirect('admin:exam_question_changelist')
+            preview = self._add_all_questions_preview(exam)
+
+        context = {
+            **self.admin_site.each_context(request),
+            'title': 'Add all questions to an exam',
+            'opts': self.model._meta,
+            'form': form,
+            'preview': preview,
+            'question_changelist_url': reverse('admin:exam_question_changelist'),
+        }
+        request.current_app = self.admin_site.name
+        return TemplateResponse(
+            request,
+            'admin/exam/question/add_all_questions_to_exam.html',
+            context,
+        )
 
     @admin.display(description='Images')
     def images_count(self, obj):

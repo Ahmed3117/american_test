@@ -1,0 +1,46 @@
+{% extends "admin/base_site.html" %}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Home</a>
+    &rsaquo; <a href="{{ question_changelist_url }}">Questions</a>
+    &rsaquo; Add all questions to an exam
+  </div>
+{% endblock %}
+
+{% block content %}
+  <p class="errornote">
+    Temporary recovery tool: this attaches every question in the database,
+    including inactive, essay, and other-course questions. It can change an
+    exam that already has student trials.
+  </p>
+
+  {% if preview %}
+    <h2>Confirm target exam</h2>
+    <p><strong>{{ preview.exam }}</strong></p>
+    <ul>
+      <li>All questions: {{ preview.total }}</li>
+      <li>MCQ questions: {{ preview.mcq }}</li>
+      <li>Essay questions: {{ preview.essay }}</li>
+      <li>Inactive questions: {{ preview.inactive }}</li>
+      <li>Already linked: {{ preview.already_linked }}</li>
+      <li>New links to add: {{ preview.to_add }}</li>
+      <li>Inactive links to reactivate: {{ preview.inactive_links_to_reactivate }}</li>
+      <li>Existing trials that may be affected: {{ preview.existing_trials }}</li>
+    </ul>
+    <form method="post">
+      {% csrf_token %}
+      <input type="hidden" name="exam" value="{{ preview.exam.pk }}">
+      <input type="hidden" name="confirm" value="yes">
+      <input type="submit" value="Yes, add all questions">
+      <a href="{{ question_changelist_url }}" class="button cancel-link">Cancel</a>
+    </form>
+  {% else %}
+    <form method="post">
+      {% csrf_token %}
+      {{ form.as_p }}
+      <input type="submit" value="Review changes">
+      <a href="{{ question_changelist_url }}" class="button cancel-link">Cancel</a>
+    </form>
+  {% endif %}
+{% endblock %}

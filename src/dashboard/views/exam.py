@@ -20,6 +20,7 @@ from django.db.models import (
     When,
 )
 from django.db.models.functions import Coalesce
+from django.http import QueryDict
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from django_filters import rest_framework as filters
@@ -249,12 +250,26 @@ def _remove_question_images(question, raw_ids):
 
 
 def _strip_parser_artifacts(data):
-    cleaned = data.copy()
-    cleaned.pop("answers", None)
-    for key in list(cleaned.keys()):
-        if str(key).startswith("answers["):
-            cleaned.pop(key, None)
-    return cleaned
+    """Remove nested-answer keys without deep-copying uploaded file streams."""
+
+    def keep_key(key):
+        key = str(key)
+        return key != "answers" and not key.startswith("answers[")
+
+    if hasattr(data, "lists"):
+        cleaned = QueryDict(
+            "",
+            mutable=True,
+            encoding=getattr(data, "encoding", None),
+        )
+        for key, values in data.lists():
+            if keep_key(key):
+                # setlist creates a new list but keeps UploadedFile instances
+                # themselves unchanged, including disk-backed temporary files.
+                cleaned.setlist(key, list(values))
+        return cleaned
+
+    return {key: value for key, value in data.items() if keep_key(key)}
 
 
 def _coerce_int_list(values):
