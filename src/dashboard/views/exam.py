@@ -80,6 +80,7 @@ from dashboard.serializers.exam.exam import (
     TempExamAllowedTimesSerializer,
     TopStudentResultSerializer,
     YearSerializer,
+    answer_payload_matches_existing,
 )
 
 
@@ -224,12 +225,35 @@ def _question_course_filter(course_id):
     return Q(course_id=course_id)
 
 
-def _answer_payload_from_request(request, prefix):
-    return {
-        "text": request.data.get(f"{prefix}[text]"),
-        "is_correct": str(request.data.get(f"{prefix}[is_correct]", "")).lower() == "true",
-        "image": request.FILES.get(f"{prefix}[image]"),
-    }
+def _answer_payload_from_request(request, prefix, *, partial=False):
+    """Build an answer payload without overwriting omitted PATCH fields."""
+    payload = {}
+    text_key = f"{prefix}[text]"
+    correct_key = f"{prefix}[is_correct]"
+    image_key = f"{prefix}[image]"
+
+    if not partial or text_key in request.data:
+        payload["text"] = request.data.get(text_key)
+    if not partial or correct_key in request.data:
+        payload["is_correct"] = bool(_bool(request.data.get(correct_key)))
+    if image_key in request.FILES:
+        payload["image"] = request.FILES[image_key]
+    elif image_key in request.data:
+        payload["image"] = _nullable_form_value(request.data.get(image_key))
+    elif not partial:
+        payload["image"] = None
+    return payload
+
+
+def _has_indexed_answer_payload(request, prefix):
+    """Return whether any supported field was supplied for one answer index."""
+    keys = (
+        f"{prefix}[id]",
+        f"{prefix}[text]",
+        f"{prefix}[is_correct]",
+        f"{prefix}[image]",
+    )
+    return any(key in request.data or key in request.FILES for key in keys)
 
 
 def _has_indexed_answers(data):
@@ -639,27 +663,36 @@ class QuestionRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
             except ValueError as exc:
                 return Response({"error": str(exc), "field": "remove_image_ids"}, status=status.HTTP_400_BAD_REQUEST)
 
-        processed_ids = []
+        answer_entries = []
         index = 0
-        while f"answers[{index}][text]" in request.data:
-            answer_id = request.data.get(f"answers[{index}][id]")
-            payload = _answer_payload_from_request(request, f"answers[{index}]")
-            payload["question"] = instance.id
+        while _has_indexed_answer_payload(request, f"answers[{index}]"):
+            prefix = f"answers[{index}]"
+            answer_id = request.data.get(f"{prefix}[id]")
+            payload = _answer_payload_from_request(
+                request,
+                prefix,
+                partial=True,
+            )
+            answer_entries.append((answer_id, payload))
+            index += 1
+
+        # Process updates before creations. Some clients can accidentally send
+        # the edited answer twice: once with its id and once without it. After
+        # the id-based update, the duplicate payload matches and is ignored.
+        for answer_id, payload in answer_entries:
             if answer_id:
                 answer = get_object_or_404(Answer, id=answer_id, question=instance)
                 answer_serializer = AnswerSerializer(answer, data=payload, partial=True)
                 answer_serializer.is_valid(raise_exception=True)
                 answer_serializer.save()
-                processed_ids.append(int(answer_id))
-            else:
-                answer_serializer = AnswerSerializer(data=payload)
-                answer_serializer.is_valid(raise_exception=True)
-                saved = answer_serializer.save()
-                processed_ids.append(saved.id)
-            index += 1
 
-        if processed_ids:
-            instance.answers.exclude(id__in=processed_ids).delete()
+        for answer_id, payload in answer_entries:
+            if answer_id or answer_payload_matches_existing(instance, payload):
+                continue
+            payload["question"] = instance.id
+            answer_serializer = AnswerSerializer(data=payload)
+            answer_serializer.is_valid(raise_exception=True)
+            answer_serializer.save()
 
         instance = self.get_object()
         return Response(self.get_serializer(instance).data)

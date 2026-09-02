@@ -43,6 +43,22 @@ class AnswerSerializer(serializers.ModelSerializer):
         }
 
 
+def answer_payload_matches_existing(question, payload):
+    """Return whether the supplied answer fields already match an answer.
+
+    This is used by partial question updates to ignore a duplicated no-id
+    answer row after its corresponding id-based row has been updated.  Only
+    scalar fields are compared; an uploaded image without an answer id is a
+    genuine new-answer payload and must still go through normal validation.
+    """
+    lookup = {
+        field: payload[field]
+        for field in ("text", "is_correct")
+        if field in payload
+    }
+    return bool(lookup) and question.answers.filter(**lookup).exists()
+
+
 class QuestionSerializer(serializers.ModelSerializer):
     answers = AnswerSerializer(many=True, required=False)
     images = QuestionImageSerializer(many=True, read_only=True)
@@ -121,15 +137,32 @@ class QuestionSerializer(serializers.ModelSerializer):
         if answers_data is not None:
             raw_answers = self.initial_data.get("answers", [])
             processed_ids = []
-            for i, answer_data in enumerate(answers_data):
-                raw_id = raw_answers[i].get("id") if i < len(raw_answers) else None
+            entries = [
+                (
+                    raw_answers[i].get("id") if i < len(raw_answers) else None,
+                    answer_data,
+                )
+                for i, answer_data in enumerate(answers_data)
+            ]
+
+            # Update id-based rows first so a repeated no-id row can be
+            # recognized against the answer's new state instead of inserted.
+            for raw_id, answer_data in entries:
                 if raw_id and instance.answers.filter(id=raw_id).exists():
                     Answer.objects.filter(id=raw_id, question=instance).update(**answer_data)
                     processed_ids.append(int(raw_id))
+
+            for raw_id, answer_data in entries:
+                if raw_id:
+                    continue
+                if self.partial and answer_payload_matches_existing(instance, answer_data):
+                    continue
                 else:
                     answer = Answer.objects.create(question=instance, **answer_data)
                     processed_ids.append(answer.id)
-            instance.answers.exclude(id__in=processed_ids).delete()
+
+            if not self.partial:
+                instance.answers.exclude(id__in=processed_ids).delete()
             try:
                 del instance._prefetched_objects_cache['answers']
             except (AttributeError, KeyError):
