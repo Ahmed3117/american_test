@@ -529,9 +529,11 @@ class ExamConfigView(APIView):
 
 
 class QuestionCategoryListCreateView(generics.ListCreateAPIView):
-    queryset = QuestionCategory.objects.order_by("id")
+    queryset = QuestionCategory.objects.select_related("course").order_by("id")
     permission_classes = STAFF_PERMISSIONS
     serializer_class = QuestionCategorySerializer
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ["course"]
 
 
 class QuestionCategoryRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):

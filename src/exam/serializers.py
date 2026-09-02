@@ -23,6 +23,25 @@ from .serializer_fields import StoredFileField
 from .services import select_exam_question_ids
 from subscription.access import student_has_course_access
 
+
+class StudentQuestionCategoryOptionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = QuestionCategory
+        fields = ['id', 'title']
+
+
+class StudentUnitOptionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Unit
+        fields = ['id', 'name']
+
+
+class StudentYearOptionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Year
+        fields = ['id', 'value']
+
+
 class ExamSerializer(serializers.ModelSerializer):
     student = serializers.PrimaryKeyRelatedField(read_only=True)
     student_name = serializers.CharField(source='student.name', read_only=True)
@@ -99,6 +118,10 @@ class ExamSerializer(serializers.ModelSerializer):
         if unit and (unit.course_id != course.id or not unit.is_active):
             raise serializers.ValidationError(
                 {'unit': 'The unit must be active and belong to the selected course.'}
+            )
+        if category and category.course_id and category.course_id != course.id:
+            raise serializers.ValidationError(
+                {'category': 'The category must belong to the selected course.'}
             )
 
         difficulty_counts = {

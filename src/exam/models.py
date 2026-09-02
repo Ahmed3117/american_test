@@ -148,6 +148,13 @@ class ExamConfig(models.Model):
 
 class QuestionCategory(models.Model):
     title = models.CharField(max_length=200)
+    course = models.ForeignKey(
+        Course,
+        on_delete=models.SET_NULL,
+        related_name='question_categories',
+        null=True,
+        blank=True,
+    )
 
     def __str__(self):
         return self.title

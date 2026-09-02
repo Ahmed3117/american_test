@@ -28,8 +28,19 @@ except ImportError:
             return inner
         return decorator(func) if func else decorator
 # Models
-from .serializers import ExamSerializer, QuestionSerializerWithCorrectAnswer, QuestionSerializerWithoutCorrectAnswer, StudentBankSerializer, StudentExamResultSerializer, AdminQuestionBankSerializer, StudentCreatedExamSerializer
-from .models import AddReasonChoices, Answer, EssaySubmission, Exam, ExamModel, ExamModelQuestion, ExamQuestion, Question, QuestionType, Result, ResultTrial, StudentBank, Submission, TempExam, TempExamAllowedTimes, AdminQuestionBank, StudentCreatedExam
+from .serializers import (
+    AdminQuestionBankSerializer,
+    ExamSerializer,
+    QuestionSerializerWithCorrectAnswer,
+    QuestionSerializerWithoutCorrectAnswer,
+    StudentBankSerializer,
+    StudentCreatedExamSerializer,
+    StudentExamResultSerializer,
+    StudentQuestionCategoryOptionSerializer,
+    StudentUnitOptionSerializer,
+    StudentYearOptionSerializer,
+)
+from .models import AddReasonChoices, Answer, EssaySubmission, Exam, ExamModel, ExamModelQuestion, ExamQuestion, Question, QuestionCategory, QuestionType, Result, ResultTrial, StudentBank, Submission, TempExam, TempExamAllowedTimes, AdminQuestionBank, StudentCreatedExam, Year
 from course.models import Course, Unit
 from student.models import Student
 from subscription.access import student_has_course_access
@@ -42,6 +53,35 @@ class HasStudentProfile(BasePermission):
 
     def has_permission(self, request, view):
         return hasattr(request.user, 'student')
+
+
+class StudentQuestionCategoryOptionListView(generics.ListAPIView):
+    serializer_class = StudentQuestionCategoryOptionSerializer
+    permission_classes = [IsAuthenticated, HasStudentProfile]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['course']
+    pagination_class = None
+    queryset = QuestionCategory.objects.only(
+        'id', 'title', 'course_id'
+    ).order_by('title', 'id')
+
+
+class StudentUnitOptionListView(generics.ListAPIView):
+    serializer_class = StudentUnitOptionSerializer
+    permission_classes = [IsAuthenticated, HasStudentProfile]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['course']
+    pagination_class = None
+    queryset = Unit.objects.filter(is_active=True).only(
+        'id', 'name', 'course_id', 'order'
+    ).order_by('order', 'name', 'id')
+
+
+class StudentYearOptionListView(generics.ListAPIView):
+    serializer_class = StudentYearOptionSerializer
+    permission_classes = [IsAuthenticated, HasStudentProfile]
+    pagination_class = None
+    queryset = Year.objects.only('id', 'value').order_by('-value', 'id')
 
 
 def _question_explanation_fields(question, prefix="question_explanation"):

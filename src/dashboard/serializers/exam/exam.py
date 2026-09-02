@@ -212,7 +212,7 @@ class ExamConfigSerializer(serializers.ModelSerializer):
 class QuestionCategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = QuestionCategory
-        fields = ["id", "title"]
+        fields = ["id", "title", "course"]
 
 
 class YearSerializer(serializers.ModelSerializer):
