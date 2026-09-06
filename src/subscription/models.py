@@ -6,6 +6,8 @@ from decimal import Decimal, ROUND_HALF_UP
 from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
+from django.db.models.signals import m2m_changed
+from django.dispatch import receiver
 from django.utils import timezone
 
 from course.models import Course
@@ -157,6 +159,18 @@ class PlanSubscription(models.Model):
     easypay_payment_url = models.URLField(blank=True, null=True)
     easypay_payload = models.JSONField(default=dict, blank=True)
     paid_at = models.DateTimeField(null=True, blank=True)
+    access_starts_on = models.DateField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Concrete start date captured for this subscription's plan cycle.",
+    )
+    access_ends_on = models.DateField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Concrete end date captured for this subscription's plan cycle.",
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -172,7 +186,23 @@ class PlanSubscription(models.Model):
 
     @property
     def has_access_now(self):
-        return self.is_paid and self.plan.is_currently_available()
+        today = timezone.localdate()
+        start, end = self.access_period
+        return self.is_paid and self.plan.is_active and start <= today <= end
+
+    @property
+    def access_period(self):
+        """Return this purchase's fixed plan occurrence, never a future cycle."""
+        if self.access_starts_on and self.access_ends_on:
+            return self.access_starts_on, self.access_ends_on
+
+        reference_date = timezone.localdate()
+        if self.created_at:
+            created_at = self.created_at
+            if timezone.is_aware(created_at):
+                created_at = timezone.localtime(created_at)
+            reference_date = created_at.date()
+        return self.plan.period_for(reference_date)
 
     @property
     def invoice_amount(self):
@@ -200,6 +230,11 @@ class PlanSubscription(models.Model):
         )
 
     def clean(self):
+        if self.access_starts_on and self.access_ends_on:
+            if self.access_ends_on < self.access_starts_on:
+                raise ValidationError(
+                    {"access_ends_on": "Access end date cannot be before its start date."}
+                )
         if self.plan and self.pk:
             max_allowed = self.plan.number_of_allowed_courses_to_subscribe
             current_count = self.courses.count()
@@ -209,17 +244,11 @@ class PlanSubscription(models.Model):
     def mark_paid(self, status=None):
         self.payment_status = status or self.PAYMENT_PAID
         self.paid_at = self.paid_at or timezone.now()
-        self.save(update_fields=["payment_status", "paid_at", "updated_at"])
-        self.sync_course_subscriptions()
-
-    def sync_course_subscriptions(self):
-        for course in self.courses.all():
-            CourseSubscription.objects.update_or_create(
-                student=self.student,
-                course=course,
-                plan_subscription=self,
-                defaults={"active": self.has_access_now},
-            )
+        update_fields = ["payment_status", "paid_at", "updated_at"]
+        if not self.access_starts_on or not self.access_ends_on:
+            self.access_starts_on, self.access_ends_on = self.access_period
+            update_fields.extend(["access_starts_on", "access_ends_on"])
+        self.save(update_fields=update_fields)
 
 
 class PlanSubscriptionCourse(models.Model):
@@ -233,41 +262,66 @@ class PlanSubscriptionCourse(models.Model):
     def __str__(self):
         return f"{self.subscription} -> {self.course}"
 
+    def clean(self):
+        super().clean()
+        if not self.subscription_id:
+            return
 
-class CourseSubscriptionQuerySet(models.QuerySet):
-    def currently_accessible(self):
-        ids = [
-            item.id
-            for item in self.select_related("plan_subscription__plan")
-            if item.has_access_now
-        ]
-        return self.filter(id__in=ids)
+        subscription = self.subscription
+        if not subscription.is_paid:
+            return
+
+        original = None
+        if self.pk:
+            original = type(self).objects.filter(pk=self.pk).first()
+        if original and (
+            original.subscription_id == self.subscription_id
+            and original.course_id == self.course_id
+        ):
+            return
+        raise ValidationError(
+            "Courses cannot be added to or changed on a paid subscription."
+        )
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        if self.subscription.is_paid:
+            raise ValidationError(
+                "Courses cannot be removed from a paid subscription."
+            )
+        return super().delete(*args, **kwargs)
 
 
-class CourseSubscription(models.Model):
-    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name="course_subscriptions")
-    course = models.ForeignKey(Course, on_delete=models.CASCADE, related_name="course_subscriptions")
-    plan_subscription = models.ForeignKey(
-        PlanSubscription,
-        on_delete=models.CASCADE,
-        related_name="course_subscriptions",
-        null=True,
-        blank=True,
-    )
-    active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
+@receiver(m2m_changed, sender=PlanSubscription.courses.through)
+def prevent_paid_subscription_course_changes(
+    sender, instance, action, reverse, pk_set, **kwargs
+):
+    """Keep a paid purchase's selected-course snapshot immutable."""
+    if action not in {"pre_add", "pre_remove", "pre_clear"}:
+        return
 
-    objects = CourseSubscriptionQuerySet.as_manager()
+    if not reverse:
+        has_paid_target = instance.is_paid
+    elif action == "pre_clear":
+        has_paid_target = instance.plan_subscriptions.filter(
+            payment_status__in=[
+                PlanSubscription.PAYMENT_PAID,
+                PlanSubscription.PAYMENT_MANUAL,
+            ]
+        ).exists()
+    else:
+        has_paid_target = PlanSubscription.objects.filter(
+            pk__in=pk_set or [],
+            payment_status__in=[
+                PlanSubscription.PAYMENT_PAID,
+                PlanSubscription.PAYMENT_MANUAL,
+            ],
+        ).exists()
 
-    class Meta:
-        unique_together = ("student", "course", "plan_subscription")
-        ordering = ["-created_at"]
-
-    @property
-    def has_access_now(self):
-        if not self.active or not self.plan_subscription:
-            return False
-        return self.plan_subscription.has_access_now
-
-    def __str__(self):
-        return f"{self.student} -> {self.course}"
+    if has_paid_target:
+        raise ValidationError(
+            "Courses cannot be changed on a paid subscription."
+        )

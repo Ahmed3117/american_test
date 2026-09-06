@@ -3,27 +3,21 @@ from django.utils.translation import gettext_lazy as _
 from django.core.exceptions import ValidationError
 from course.models import Course, Unit
 from student.models import Student
-import random
+
+
+def _check_constraint(*, condition, name):
+    """Build a CheckConstraint on both local Django 5.0 and production 6.x."""
+    try:
+        return models.CheckConstraint(condition=condition, name=name)
+    except TypeError:
+        return models.CheckConstraint(check=condition, name=name)
 
 
 # Choices
-class RelatedToChoices(models.TextChoices):
-    COURSE = 'COURSE', _('Course')
-    UNIT = 'UNIT', _('Unit')
-
 class DifficultyLevel(models.TextChoices):
     EASY = 'EASY', _('Easy')
     MEDIUM = 'MEDIUM', _('Medium')
     HARD = 'HARD', _('Hard')
-
-class ExamType(models.TextChoices):
-    RANDOM = 'RANDOM', _('Random')
-    MANUAL = 'MANUAL', _('Manual')
-    BANK = 'BANK', _('Pic From the Bank')
-
-class PonusOption(models.TextChoices):
-    STUDENT_LAST_TRIAL_SCORE = 'student_last_trial_score', _('Student Last Trial Score')
-    FIXED_PONUS = 'fixed_ponus', _('Fixed Ponus')
 
 class QuestionType(models.TextChoices):
     MCQ = 'MCQ', _('Multiple Choice Question')
@@ -123,7 +117,7 @@ class ExamConfig(models.Model):
 
     class Meta:
         constraints = [
-            models.CheckConstraint(condition=models.Q(id=1), name='single_exam_config'),
+            _check_constraint(condition=models.Q(id=1), name='single_exam_config'),
         ]
 
     @classmethod
@@ -145,6 +139,49 @@ class ExamConfig(models.Model):
 
     def __str__(self):
         return "Main exam trial limits"
+
+
+class UnsubscribedExamConfig(models.Model):
+    """Singleton limits for main exams taken without a course subscription."""
+
+    max_trials = models.PositiveIntegerField(
+        default=3,
+        help_text="Lifetime main-exam trial starts allowed per unsubscribed student.",
+    )
+    max_questions_per_exam = models.PositiveIntegerField(
+        default=10,
+        help_text="Maximum questions in a main exam created or started without a subscription.",
+    )
+
+    class Meta:
+        constraints = [
+            _check_constraint(
+                condition=models.Q(id=1),
+                name='single_unsub_exam_config',
+            ),
+            _check_constraint(
+                condition=models.Q(max_questions_per_exam__gte=1),
+                name='unsub_exam_questions_gte_1',
+            ),
+        ]
+
+    @classmethod
+    def load(cls):
+        config, _ = cls.objects.get_or_create(pk=1)
+        return config
+
+    def clean(self):
+        super().clean()
+        if self.max_questions_per_exam < 1:
+            raise ValidationError(_("The maximum question count must be at least 1."))
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return "Unsubscribed main exam limits"
 
 class QuestionCategory(models.Model):
     title = models.CharField(max_length=200)
@@ -195,12 +232,6 @@ class Question(models.Model):
     created = models.DateTimeField(auto_now_add=True)
     question_type = models.CharField(max_length=5, choices=QuestionType.choices, default=QuestionType.MCQ)
     comment = models.TextField(null=True, blank=True)
-    similar_questions = models.ManyToManyField(
-        'self', 
-        blank=True, 
-        symmetrical=True,
-        help_text="Questions that are similar to this question"
-    )
     explanation_text = models.TextField(null=True, blank=True, help_text="Explanation text for the question")
     explanation_video_url = models.FileField(
         upload_to='question_explanations/video/',
@@ -223,7 +254,7 @@ class Question(models.Model):
             # Composite indexes for CreateTempExam performance
             models.Index(fields=['question_type', 'is_active']),
             models.Index(fields=['is_active', 'question_type']),
-            # For similar question lookups and filtering
+            # Efficient primary-key and active/type filtering
             models.Index(fields=['id', 'is_active', 'question_type']),
             # For course/unit/category based filtering with active/type checks
             models.Index(fields=['course', 'is_active', 'question_type']),
@@ -239,13 +270,6 @@ class Question(models.Model):
         if self.unit:
             self.course = self.unit.course
         super().save(*args, **kwargs)
-
-    def get_random_similar_question(self):
-        """Get a random similar question, or return self if no similar questions exist"""
-        similar_questions = list(self.similar_questions.filter(is_active=True, question_type=QuestionType.MCQ))
-        if similar_questions:
-            return random.choice(similar_questions)
-        return self  # Return the question itself if no similar questions exist
 
     def __str__(self):
         return str(self.id) + " | " + str(self.question_type) + " | " + self.text
@@ -289,38 +313,6 @@ class ExamQuestion(models.Model):
     def __str__(self):
         return f"Exam: {self.exam.title} | Question: {self.question.text} | Active: {self.is_active}"
 
-class RandomExamBank(models.Model):
-    exam = models.ForeignKey(Exam, on_delete=models.CASCADE, related_name='random_exam_bank')
-    questions = models.ManyToManyField(Question, related_name='random_exam_bank')
-
-    def __str__(self):
-        return f"Random Exam Bank for {self.exam.title}"
-
-class ExamModel(models.Model):
-    """Model to store different versions of a random exam"""
-    exam = models.ForeignKey(Exam, on_delete=models.CASCADE, related_name='exam_models')
-    title = models.CharField(max_length=120)
-    created = models.DateTimeField(auto_now_add=True)
-    is_active = models.BooleanField(default=True)
-
-    def __str__(self):
-        return f"{self.exam.title} - Model: {self.title}"
-
-class ExamModelQuestion(models.Model):
-    """Questions assigned to a specific exam model"""
-    exam_model = models.ForeignKey(ExamModel, on_delete=models.CASCADE, related_name='model_questions')
-    question = models.ForeignKey(Question, on_delete=models.CASCADE)
-    is_active = models.BooleanField(default=True)
-
-    class Meta:
-        unique_together = ('exam_model', 'question')
-        indexes = [
-            # For efficient filtering by exam model and active status
-            models.Index(fields=['exam_model', 'is_active']),
-            # For question-based lookups
-            models.Index(fields=['question', 'is_active']),
-        ]
-
 class Submission(models.Model):
     student = models.ForeignKey(Student, on_delete=models.CASCADE)
     exam = models.ForeignKey(Exam, on_delete=models.CASCADE, related_name='submissions')
@@ -356,33 +348,11 @@ class Submission(models.Model):
         return f"{self.result_trial} |{self.question.text} | Correct: {self.is_correct} | Solved: {self.is_solved}"
 
 
-class EssaySubmission(models.Model):
-    student = models.ForeignKey(Student, on_delete=models.CASCADE)
-    exam = models.ForeignKey(Exam, on_delete=models.CASCADE,related_name='essaysubmissions')
-    question = models.ForeignKey(Question, on_delete=models.CASCADE)
-    answer_text = models.TextField()
-    answer_file = models.FileField(upload_to='essay_submissions/', null=True, blank=True)  # New field
-    score = models.FloatField(null=True, blank=True)
-    is_scored = models.BooleanField(default=False)
-    created = models.DateTimeField(auto_now_add=True)
-    result_trial = models.ForeignKey('ResultTrial', on_delete=models.CASCADE, related_name='essay_submissions', null=True, blank=True)
-
-    class Meta:
-        # Ensure unique essay submission per student, exam, question, and result_trial
-        unique_together = [['student', 'exam', 'question', 'result_trial']]
-
-    def __str__(self):
-        return f" {self.result_trial} | {self.question.text} | Score: {self.score}"
-
 class Result(models.Model):
     student = models.ForeignKey(Student, on_delete=models.CASCADE)
     exam = models.ForeignKey(Exam, on_delete=models.CASCADE, related_name='results')
     trial = models.PositiveIntegerField(default=0)
     added = models.DateTimeField(auto_now_add=True)
-    exam_model = models.ForeignKey(
-        ExamModel, on_delete=models.SET_NULL, null=True, blank=True
-    )
-
     class Meta:
         unique_together = ('student', 'exam')  # One result per student-exam combination.
         indexes = [
@@ -420,8 +390,20 @@ class Result(models.Model):
 
     @property
     def is_trials_finished(self):
-        """Main exams have no lifetime limit; calendar quotas reset over time."""
-        return False
+        """Whether a guest has exhausted the lifetime allowance for this exam."""
+        if self.has_unsubmitted_trial:
+            return False
+
+        from subscription.access import student_has_course_access
+
+        if student_has_course_access(self.student, self.exam.course):
+            # Subscribed limits reset by calendar period, so they are never a
+            # permanently finished set of trials.
+            return False
+
+        from .services import unsubscribed_trial_quota_status
+
+        return not unsubscribed_trial_quota_status(self.student)['can_start']
 
     @property
     def has_unsubmitted_trial(self):
@@ -459,7 +441,7 @@ class Result(models.Model):
             trial.submitted_by_unsubscribed_user
             for trial in self.trials.all()
         )
-        
+
     def __str__(self):
         return f"{self.student.name} - {self.exam.title} | Trial: {self.trial}"
 
@@ -476,22 +458,21 @@ class ResultTrial(models.Model):
     result = models.ForeignKey(Result, on_delete=models.CASCADE, related_name='trials')
     trial = models.PositiveIntegerField()
     score = models.FloatField(default=0.0)
-    exam_score = models.FloatField(default=0.0)  
-    exam_model = models.ForeignKey(ExamModel, on_delete=models.SET_NULL, null=True, blank=True)
+    exam_score = models.FloatField(default=0.0)
     student_started_exam_at = models.DateTimeField()
     student_submitted_exam_at = models.DateTimeField(null=True, blank=True)
     submitted_by_unsubscribed_user = models.BooleanField(
         default=False,
         db_index=True,
         editable=False,
-        help_text="The student had no active course subscription when this trial was submitted.",
+        help_text="The student had no active course subscription when this trial was started.",
     )
 
     submit_type = models.CharField(
         max_length=20,
         choices=SUBMIT_TYPE_CHOICES,
         default='student_submit',
-        null=True,  
+        null=True,
         blank=True,
     )
 
@@ -515,7 +496,6 @@ class ResultTrial(models.Model):
 class AddReasonChoices(models.TextChoices):
     INCORRECT = 'INCORRECT', _('Incorrect')
     UNSOLVED = 'UNSOLVED', _('Unsolved')
-    PARTIAL_ESSAY = 'PARTIAL_ESSAY', _('Partial Essay Score')
 
 class StudentBank(models.Model):
     student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='student_bank')
@@ -543,11 +523,35 @@ class TempExam(models.Model):
     student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='temp_exams')
     course = models.ForeignKey(Course, on_delete=models.SET_NULL, null=True, blank=True)
     unit = models.ForeignKey(Unit, on_delete=models.SET_NULL, null=True, blank=True)
+    category = models.ForeignKey(
+        QuestionCategory,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='temp_exams',
+    )
+    years = models.ManyToManyField(Year, blank=True, related_name='temp_exams')
     number_of_questions = models.PositiveIntegerField()
     time_limit = models.PositiveIntegerField(null=True, blank=True, help_text="Time limit in minutes")
     created = models.DateTimeField(auto_now_add=True)
-    result = models.FloatField(null=True, blank=True)
+    result = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="Frontend-calculated raw score from 0 to number_of_questions.",
+    )
     selected_questions_type = models.CharField(max_length=20, null=True, blank=True)
+    add_reason = models.CharField(
+        max_length=20,
+        choices=AddReasonChoices.choices,
+        null=True,
+        blank=True,
+    )
+    student_bank_items = models.ManyToManyField(
+        StudentBank,
+        blank=True,
+        related_name='included_in_temp_exams',
+        help_text="The exact mistake-bank questions selected for this temp exam.",
+    )
 
     class Meta:
         indexes = [
@@ -555,80 +559,10 @@ class TempExam(models.Model):
             models.Index(fields=['student', 'created']),
             # For filtering by course/unit
             models.Index(fields=['course', 'unit']),
+            models.Index(fields=['category', 'add_reason']),
             # For date-based queries and limits
             models.Index(fields=['created', 'student']),
         ]
 
     def __str__(self):
         return f"Temp Exam for {self.student.name} - {self.created}"
-
-
-class TempExamAllowedTimes(models.Model):
-    number_of_allowedtempexams_per_day = models.PositiveIntegerField(default=3)
-
-    class Meta:
-        # Ensure only one instance exists
-        constraints = [
-            models.CheckConstraint(
-                condition=models.Q(id=1),
-                name='single_instance_constraint'
-            )
-        ]
-
-    def save(self, *args, **kwargs):
-        self.id = 1  # Enforce single instance
-        super().save(*args, **kwargs)
-    def __str__(self):
-        return f"Allowed Temp Exams: {self.number_of_allowedtempexams_per_day} per day"
-
-
-
-
-
-#^ < ==============================[ <- Admin Question Bank -> ]============================== > ^#
-
-
-class AdminQuestionBank(models.Model):
-    """Model for admin to store questions for student-created exams"""
-    question = models.ForeignKey(Question, on_delete=models.CASCADE, related_name='admin_question_bank')
-    created = models.DateTimeField(auto_now_add=True)
-
-    class Meta:
-        indexes = [
-            # For efficient question lookups with creation time
-            models.Index(fields=['created', 'question']),
-            # For question-based filtering
-            models.Index(fields=['question', 'created']),
-        ]
-
-    def __str__(self):
-        return f"Admin Question Bank - Q: {self.question.id} - {self.created}"
-
-
-#^ < ==============================[ <- Student Created Exams -> ]============================== > ^#
-
-
-class StudentCreatedExam(models.Model):
-    """Model for student-created exams using questions from admin question bank"""
-    student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='created_exams')
-    course = models.ForeignKey(Course, on_delete=models.SET_NULL, null=True, blank=True)
-    unit = models.ForeignKey(Unit, on_delete=models.SET_NULL, null=True, blank=True)
-    number_of_mcq_questions = models.PositiveIntegerField()
-    number_of_essay_questions = models.PositiveIntegerField()
-    time_limit = models.PositiveIntegerField(help_text="Time limit in minutes")
-    created = models.DateTimeField(auto_now_add=True)
-    exam_score = models.FloatField(default=0.0)
-    result = models.FloatField(null=True, blank=True)
-    
-    class Meta:
-        indexes = [
-            # For student-based exam queries
-            models.Index(fields=['student', 'created']),
-            # For filtering by course/unit
-            models.Index(fields=['course', 'unit']),
-            # For date-based queries and limits
-            models.Index(fields=['created', 'student']),
-        ]
-
-    def __str__(self):
-        return f"Student Created Exam for {self.student.name} - {self.created}"

@@ -24,36 +24,27 @@ def get_accessible_course_ids_for_student(student):
     )
     for subscription in subscriptions:
         if subscription.has_access_now:
-            course_ids.update(subscription.courses.values_list("id", flat=True))
+            course_ids.update(course.id for course in subscription.courses.all())
     return course_ids
 
 
 def student_has_course_access(student, course):
     if not student or not course:
         return False
-    return PlanSubscription.objects.filter(
-        student=student,
-        courses=course,
-        payment_status__in=[
-            PlanSubscription.PAYMENT_PAID,
-            PlanSubscription.PAYMENT_MANUAL,
-        ],
-        plan__is_active=True,
-    ).distinct().select_related("plan").filter(
-        id__in=[
-            subscription.id
-            for subscription in PlanSubscription.objects.filter(
-                student=student,
-                courses=course,
-                payment_status__in=[
-                    PlanSubscription.PAYMENT_PAID,
-                    PlanSubscription.PAYMENT_MANUAL,
-                ],
-                plan__is_active=True,
-            ).select_related("plan")
-            if subscription.has_access_now
-        ]
-    ).exists()
+    subscriptions = (
+        PlanSubscription.objects.filter(
+            student=student,
+            courses=course,
+            payment_status__in=[
+                PlanSubscription.PAYMENT_PAID,
+                PlanSubscription.PAYMENT_MANUAL,
+            ],
+            plan__is_active=True,
+        )
+        .select_related("plan")
+        .distinct()
+    )
+    return any(subscription.has_access_now for subscription in subscriptions)
 
 
 def user_has_course_access(user, course):

@@ -2,25 +2,34 @@ from django.db import transaction
 from django.shortcuts import get_object_or_404
 from rest_framework import generics, status
 from rest_framework.exceptions import ValidationError
-from rest_framework.permissions import IsAuthenticated
+from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from course.models import Course
 from services.easypay_service import easypay_service
+from student.models import Student
 
 from .models import DiscountCoupon, Plan, PlanSubscription
 from .serializers import (
     ApplyDiscountCouponSerializer,
     PlanSerializer,
     PlanSubscriptionSerializer,
+    StudentPlanSerializer,
     SubscribePlanSerializer,
 )
 from .services import create_plan_subscription_invoice
 
 
+class HasStudentProfile(BasePermission):
+    message = "A student account is required."
+
+    def has_permission(self, request, view):
+        return hasattr(request.user, "student")
+
+
 class PlanListView(generics.ListAPIView):
-    serializer_class = PlanSerializer
+    serializer_class = StudentPlanSerializer
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
@@ -28,31 +37,63 @@ class PlanListView(generics.ListAPIView):
         # `period_for(today)`, so we can't push it to SQL. We narrow to
         # `is_active=True` at the DB level and then filter in Python by the
         # computed property.
-        return [plan for plan in Plan.objects.filter(is_active=True) if plan.is_currently_available()]
+        plans = [
+            plan
+            for plan in Plan.objects.filter(is_active=True)
+            if plan.is_currently_available()
+        ]
+        self.visible_plan_ids = [plan.id for plan in plans]
+        return plans
+
+    def get_serializer_context(self):
+        context = super().get_serializer_context()
+        subscriptions = PlanSubscription.objects.filter(
+            student__user_id=self.request.user.id,
+            plan_id__in=getattr(self, "visible_plan_ids", []),
+        ).select_related("plan")
+        context["pending_plan_ids"] = {
+            subscription.plan_id
+            for subscription in subscriptions
+            if subscription.payment_status == PlanSubscription.PAYMENT_PENDING
+        }
+        context["accessible_plan_ids"] = {
+            subscription.plan_id
+            for subscription in subscriptions
+            if subscription.has_access_now
+        }
+        return context
 
 
 class MyPlanSubscriptionsView(generics.ListAPIView):
     serializer_class = PlanSubscriptionSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasStudentProfile]
 
     def get_queryset(self):
         return PlanSubscription.objects.filter(student=self.request.user.student).prefetch_related("courses")
 
 
 class HasPaidPlanSubscriptionView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasStudentProfile]
 
     def get(self, request, plan_id):
         plan = get_object_or_404(Plan, pk=plan_id)
-        paid_subscription = (
+        paid_subscriptions = (
             PlanSubscription.objects.filter(
                 student=request.user.student,
                 plan=plan,
+                payment_status__in=[
+                    PlanSubscription.PAYMENT_PAID,
+                    PlanSubscription.PAYMENT_MANUAL,
+                ],
             )
+            .select_related("plan")
             .order_by("-created_at")
-            .first()
         )
-        has_paid = bool(paid_subscription and paid_subscription.is_paid)
+        paid_subscription = next(
+            (subscription for subscription in paid_subscriptions if subscription.has_access_now),
+            None,
+        )
+        has_paid = paid_subscription is not None
         return Response(
             {
                 "plan_id": plan.id,
@@ -63,14 +104,14 @@ class HasPaidPlanSubscriptionView(APIView):
 
 
 class PlanSubscriptionPaymentStatusView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasStudentProfile]
 
     def get(self, request, subscription_id):
         subscription = get_object_or_404(
             PlanSubscription.objects.select_related("plan", "student"),
             pk=subscription_id,
         )
-        if subscription.student_id != request.user.student.id and not request.user.is_staff:
+        if subscription.student_id != request.user.student.id:
             return Response({"error": "غير مصرح"}, status=status.HTTP_403_FORBIDDEN)
 
         remote_status = None
@@ -96,33 +137,64 @@ class PlanSubscriptionPaymentStatusView(APIView):
                 "remote_error": remote_error,
                 "payment_url": subscription.easypay_payment_url,
                 "paid_at": subscription.paid_at,
+                "access_starts_on": subscription.access_starts_on,
+                "access_ends_on": subscription.access_ends_on,
             }
         )
 
 
 class SubscribePlanView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasStudentProfile]
 
     def post(self, request, plan_id):
         plan = get_object_or_404(Plan, pk=plan_id, is_active=True)
+        if not plan.is_currently_available():
+            raise ValidationError(
+                {"plan": ["This plan is outside its current subscription window."]}
+            )
         serializer = SubscribePlanSerializer(data=request.data, context={"plan": plan})
         serializer.is_valid(raise_exception=True)
 
         course_ids = serializer.validated_data["course_ids"]
 
         with transaction.atomic():
-            existing_subscription = (
+            # Lock one stable parent row so two first-time requests for the
+            # same student cannot both create a subscription concurrently.
+            Student.objects.select_for_update().get(pk=request.user.student.pk)
+            plan_subscriptions = list(
                 PlanSubscription.objects.select_for_update()
                 .filter(student=request.user.student, plan=plan)
+                .select_related("plan")
                 .order_by("-created_at")
-                .first()
             )
+            active_paid_subscription = next(
+                (
+                    subscription
+                    for subscription in plan_subscriptions
+                    if subscription.has_access_now
+                ),
+                None,
+            )
+            if active_paid_subscription:
+                raise ValidationError(
+                    {
+                        "plan": [
+                            "You already have an active paid subscription to this plan. "
+                            "Subscribe to it again after the current access period ends."
+                        ]
+                    }
+                )
+
+            existing_subscription = plan_subscriptions[0] if plan_subscriptions else None
+            access_starts_on, access_ends_on = plan.period_for()
 
             if existing_subscription and not existing_subscription.is_paid:
                 # Create the new one first, then remove the old unpaid one
                 new_subscription = PlanSubscription.objects.create(
                     student=request.user.student,
                     plan=plan,
+                    access_starts_on=access_starts_on,
+                    access_ends_on=access_ends_on,
                 )
                 new_subscription.courses.set(Course.objects.filter(id__in=course_ids))
                 existing_subscription.delete()
@@ -132,6 +204,8 @@ class SubscribePlanView(APIView):
                 new_subscription = PlanSubscription.objects.create(
                     student=request.user.student,
                     plan=plan,
+                    access_starts_on=access_starts_on,
+                    access_ends_on=access_ends_on,
                 )
                 new_subscription.courses.set(Course.objects.filter(id__in=course_ids))
 
@@ -140,14 +214,14 @@ class SubscribePlanView(APIView):
 
 
 class CreatePlanSubscriptionInvoiceView(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasStudentProfile]
 
     def post(self, request, subscription_id):
         subscription = get_object_or_404(
             PlanSubscription.objects.select_related("plan", "student"),
             pk=subscription_id,
         )
-        if subscription.student_id != request.user.student.id and not request.user.is_staff:
+        if subscription.student_id != request.user.student.id:
             return Response({"error": "غير مصرح"}, status=status.HTTP_403_FORBIDDEN)
 
         if subscription.is_paid:

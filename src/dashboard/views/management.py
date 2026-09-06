@@ -1,5 +1,6 @@
+from django.db.models.deletion import ProtectedError
 from django.shortcuts import get_object_or_404
-from rest_framework import generics
+from rest_framework import generics, status
 from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
@@ -26,6 +27,22 @@ class PlanListCreateView(StaffOnlyMixin, generics.ListCreateAPIView):
 class PlanDetailView(StaffOnlyMixin, generics.RetrieveUpdateDestroyAPIView):
     queryset = Plan.objects.all()
     serializer_class = PlanSerializer
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        try:
+            self.perform_destroy(instance)
+        except ProtectedError:
+            return Response(
+                {
+                    "error": (
+                        "This plan cannot be deleted because it is used by one or "
+                        "more subscriptions. Deactivate it instead."
+                    )
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class DiscountCouponListCreateView(StaffOnlyMixin, generics.ListCreateAPIView):

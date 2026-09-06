@@ -67,6 +67,11 @@ class UserSerializer(serializers.ModelSerializer):
     def validate(self, data):
         """Validate username format based on user_type"""
         import re
+
+        if self.instance is None and not data.get('password'):
+            raise serializers.ValidationError({
+                'password': 'This field is required when creating a user.'
+            })
         
         username = data.get('username')
         user_type = data.get('user_type')

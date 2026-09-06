@@ -3,6 +3,7 @@ from django.db import transaction
 
 from course.models import Course, Unit
 from .models import (
+    AddReasonChoices,
     Answer,
     DifficultyLevel,
     Exam,
@@ -13,11 +14,10 @@ from .models import (
     Result,
     StudentBank,
     TempExam,
-    AdminQuestionBank,
-    StudentCreatedExam,
+    UnsubscribedExamConfig,
     Year,
 )
-from student.models import Student,StudentFavorite
+from student.models import StudentFavorite
 from django.contrib.contenttypes.models import ContentType
 from .serializer_fields import StoredFileField
 from .services import select_exam_question_ids
@@ -111,10 +111,17 @@ class ExamSerializer(serializers.ModelSerializer):
         attrs['years'] = years
         if not course or not course.is_active:
             raise serializers.ValidationError({'course': 'An active course is required.'})
-        if not student_has_course_access(student, course):
-            raise serializers.ValidationError(
-                {'course': 'You need an active subscription for this course.'}
-            )
+        has_course_access = student_has_course_access(student, course)
+        if not has_course_access:
+            max_questions = UnsubscribedExamConfig.load().max_questions_per_exam
+            requested_questions = attrs.get('number_of_questions')
+            if requested_questions > max_questions:
+                raise serializers.ValidationError({
+                    'number_of_questions': (
+                        'Unsubscribed exams can contain at most '
+                        f'{max_questions} questions.'
+                    )
+                })
         if unit and (unit.course_id != course.id or not unit.is_active):
             raise serializers.ValidationError(
                 {'unit': 'The unit must be active and belong to the selected course.'}
@@ -443,61 +450,93 @@ class StudentBankSerializer(serializers.ModelSerializer):
         model = StudentBank
         fields = ['id', 'question', 'add_reason', 'is_solved_now', 'created', 'course', 'unit']
 
-class TempExamSerializer(serializers.ModelSerializer):
-    course = serializers.PrimaryKeyRelatedField(queryset=Course.objects.all(), required=False, allow_null=True)
-    unit = serializers.PrimaryKeyRelatedField(queryset=Unit.objects.all(), required=False, allow_null=True)
-    selected_questions_type = serializers.ChoiceField(
-        choices=['solved', 'not_solved', None],
-        allow_null=True,
-        required=False
+
+class TempExamCreateSerializer(serializers.Serializer):
+    number_of_questions = serializers.IntegerField(min_value=1)
+    time_limit = serializers.IntegerField(min_value=1, default=30)
+    course = serializers.PrimaryKeyRelatedField(
+        queryset=Course.objects.filter(is_active=True), required=False, allow_null=True
     )
+    unit = serializers.PrimaryKeyRelatedField(
+        queryset=Unit.objects.filter(is_active=True), required=False, allow_null=True
+    )
+    category = serializers.PrimaryKeyRelatedField(
+        queryset=QuestionCategory.objects.all(), required=False, allow_null=True
+    )
+    years = serializers.PrimaryKeyRelatedField(
+        queryset=Year.objects.all(), many=True, required=False
+    )
+    selected_questions_type = serializers.ChoiceField(
+        choices=['solved', 'not_solved'],
+        allow_null=True,
+        required=False,
+    )
+    add_reason = serializers.ChoiceField(
+        choices=AddReasonChoices.choices,
+        allow_null=True,
+        required=False,
+    )
+
+    def validate(self, attrs):
+        course = attrs.get('course')
+        unit = attrs.get('unit')
+        category = attrs.get('category')
+        if unit:
+            if course and unit.course_id != course.id:
+                raise serializers.ValidationError(
+                    {'unit': 'The unit must belong to the selected course.'}
+                )
+            if not course:
+                attrs['course'] = unit.course
+                course = unit.course
+        if category and category.course_id and course and category.course_id != course.id:
+            raise serializers.ValidationError(
+                {'category': 'The category must belong to the selected course.'}
+            )
+        return attrs
+
+
+class TempExamListSerializer(serializers.ModelSerializer):
+    course_name = serializers.CharField(source='course.name', read_only=True, default=None)
+    unit_name = serializers.CharField(source='unit.name', read_only=True, default=None)
+    category_name = serializers.CharField(source='category.title', read_only=True, default=None)
+    years = StudentYearOptionSerializer(many=True, read_only=True)
+    is_submitted = serializers.SerializerMethodField()
 
     class Meta:
         model = TempExam
-        fields = ['id', 'student', 'course', 'unit', 'number_of_questions', 'time_limit', 'created', 'result', 'selected_questions_type']
-
-
-class AdminQuestionBankSerializer(serializers.ModelSerializer):
-    # Accept question ID on create
-    question = serializers.PrimaryKeyRelatedField(queryset=Question.objects.all(), write_only=True)
-    # Return full question with answers (including is_correct) on read
-    question_details = QuestionSerializerWithCorrectAnswer(source='question', read_only=True)
-    # Keep existing convenience read-only fields
-    question_text = serializers.CharField(source='question.text', read_only=True)
-    question_type = serializers.CharField(source='question.question_type', read_only=True)
-    question_points = serializers.IntegerField(source='question.points', read_only=True)
-    question_explanation_text = serializers.CharField(source='question.explanation_text', read_only=True, allow_null=True)
-    question_explanation_video_url = StoredFileField(source='question.explanation_video_url', read_only=True, allow_null=True)
-    question_explanation_recorded_audio = serializers.FileField(source='question.explanation_recorded_audio', read_only=True, allow_null=True)
-
-    class Meta:
-        model = AdminQuestionBank
         fields = [
-            'id', 'question', 'question_details', 'question_text', 'question_type', 'question_points',
-            'question_explanation_text', 'question_explanation_video_url', 'question_explanation_recorded_audio',
-            'created'
+            'id',
+            'course',
+            'course_name',
+            'unit',
+            'unit_name',
+            'category',
+            'category_name',
+            'years',
+            'add_reason',
+            'selected_questions_type',
+            'number_of_questions',
+            'time_limit',
+            'result',
+            'is_submitted',
+            'created',
         ]
 
+    def get_is_submitted(self, obj):
+        return obj.result is not None
 
-class StudentCreatedExamSerializer(serializers.ModelSerializer):
-    course_name = serializers.CharField(source='course.name', read_only=True)
-    unit_name = serializers.CharField(source='unit.name', read_only=True)
-    total_questions = serializers.SerializerMethodField()
-    percentage = serializers.SerializerMethodField()
-    
-    class Meta:
-        model = StudentCreatedExam
-        fields = [
-            'id', 'student', 'course', 'course_name', 'unit', 'unit_name',
-            'number_of_mcq_questions', 'number_of_essay_questions', 'total_questions',
-            'time_limit', 'exam_score', 'result', 'percentage', 'created'
-        ]
-        read_only_fields = ['student', 'exam_score']
-    
-    def get_total_questions(self, obj):
-        return obj.number_of_mcq_questions + obj.number_of_essay_questions
-    
-    def get_percentage(self, obj):
-        if obj.result is not None and obj.exam_score > 0:
-            return (obj.result / obj.exam_score) * 100
-        return 0
+
+class TempExamDetailSerializer(TempExamListSerializer):
+    questions = serializers.SerializerMethodField()
+
+    class Meta(TempExamListSerializer.Meta):
+        fields = TempExamListSerializer.Meta.fields + ['questions']
+
+    def get_questions(self, obj):
+        questions = [item.question for item in obj.student_bank_items.all()]
+        return QuestionSerializerWithCorrectAnswer(
+            questions,
+            many=True,
+            context=self.context,
+        ).data

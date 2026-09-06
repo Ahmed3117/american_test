@@ -19,15 +19,9 @@ urlpatterns = [
     #^ ------- Student Temp Exams ------- ^#
     path('student-bank/', views.StudentBankListView.as_view(), name='student-bank-list'),
     path('create-temp-exam/', views.CreateTempExam.as_view(), name='create-temp-exam'),
+    path('temp-exams/', views.StudentTempExamListView.as_view(), name='temp-exam-list'),
+    path('temp-exams/<int:pk>/', views.StudentTempExamDetailView.as_view(), name='temp-exam-detail'),
     path('submit-temp-exam-results/', views.SubmitTempExamResults.as_view(), name='submit-temp-exam-results'),
-
-    #^ ------- Student Created Exams ------- ^#
-    path('create-student-exam/', views.CreateStudentExam.as_view(), name='create-student-exam'),
-    path('submit-student-exam-results/', views.SubmitStudentExamResults.as_view(), name='submit-student-exam-results'),
-    path('student-created-exams/', views.StudentCreatedExamListView.as_view(), name='student-created-exams'),
-    
-    #^ ------- Admin Question Bank ------- ^#
-    path('admin-question-bank/', views.AdminQuestionBankListView.as_view(), name='admin-question-bank'),
 
 ]
 

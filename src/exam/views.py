@@ -3,49 +3,43 @@ import random
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework.parsers import MultiPartParser, JSONParser
-from rest_framework.permissions import BasePermission, IsAdminUser, IsAuthenticated
+from rest_framework.parsers import MultiPartParser
+from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework import generics
 from django.shortcuts import get_object_or_404
 from django.http import Http404
 from django.utils import timezone
-from django.db.models import Count, Q, Case, When, BooleanField, Sum, Subquery, OuterRef, IntegerField, Min, Max
-from django.db.models.functions import Coalesce
+from django.db.models import Count, Min, Max
 from django.db import transaction
-from core.permissions import HasValidAPIKey
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import OrderingFilter, SearchFilter
-from django.db.models import Prefetch, prefetch_related_objects
-import logging
+from django.db.models import Prefetch
 # custom filters
-from exam.filters import RelatedCourseFilterBackend
-# celery is optional in this project; copied code only needs the decorator shape.
-try:
-    from celery import shared_task
-except ImportError:
-    def shared_task(func=None, **kwargs):
-        def decorator(inner):
-            return inner
-        return decorator(func) if func else decorator
+from exam.filters import RelatedCourseFilterBackend, StudentBankFilter
 # Models
 from .serializers import (
-    AdminQuestionBankSerializer,
     ExamSerializer,
     QuestionSerializerWithCorrectAnswer,
     QuestionSerializerWithoutCorrectAnswer,
     StudentBankSerializer,
-    StudentCreatedExamSerializer,
     StudentExamResultSerializer,
     StudentQuestionCategoryOptionSerializer,
     StudentUnitOptionSerializer,
     StudentYearOptionSerializer,
+    TempExamCreateSerializer,
+    TempExamDetailSerializer,
+    TempExamListSerializer,
 )
-from .models import AddReasonChoices, Answer, EssaySubmission, Exam, ExamModel, ExamModelQuestion, ExamQuestion, Question, QuestionCategory, QuestionType, Result, ResultTrial, StudentBank, Submission, TempExam, TempExamAllowedTimes, AdminQuestionBank, StudentCreatedExam, Year
+from .models import AddReasonChoices, Answer, Exam, ExamQuestion, Question, QuestionCategory, QuestionType, Result, ResultTrial, StudentBank, Submission, TempExam, Year
 from course.models import Course, Unit
 from student.models import Student
-from subscription.access import student_has_course_access
 from .serializer_fields import stored_file_url
-from .services import trial_quota_status
+from .services import (
+    main_exam_quota_status,
+    temp_exam_quota_status,
+    trial_quota_status,
+    unsubscribed_trial_quota_status,
+)
 
 
 class HasStudentProfile(BasePermission):
@@ -149,7 +143,21 @@ class ExamConfigStatusView(APIView):
     permission_classes = [IsAuthenticated, HasStudentProfile]
 
     def get(self, request):
-        return Response(trial_quota_status(request.user.student))
+        student = request.user.student
+        course_id = request.query_params.get('course')
+        if course_id:
+            course = get_object_or_404(Course, pk=course_id, is_active=True)
+            payload = main_exam_quota_status(student, course)
+            payload['temp_exam'] = temp_exam_quota_status(student)
+            return Response(payload)
+
+        # Keep the original subscribed quota fields at the root for backward
+        # compatibility and expose the guest allowance alongside them.
+        payload = trial_quota_status(student)
+        payload['access_type'] = 'subscribed'
+        payload['unsubscribed'] = unsubscribed_trial_quota_status(student)
+        payload['temp_exam'] = temp_exam_quota_status(student)
+        return Response(payload)
 
 
 class CheckExamStartAbility(APIView):
@@ -177,15 +185,22 @@ class CheckExamStartAbility(APIView):
                         "id": unsubmitted_trial.id,
                         "trial_number": unsubmitted_trial.trial,
                         "started_at": unsubmitted_trial.student_started_exam_at,
-                        "exam_model_id": unsubmitted_trial.exam_model.id if unsubmitted_trial.exam_model else None
                     },
-                    "quota": trial_quota_status(student),
+                    "quota": main_exam_quota_status(
+                        student,
+                        exam.course,
+                        exam.number_of_questions,
+                    ),
                 }, status=status.HTTP_200_OK)
 
         except Result.DoesNotExist:
             pass
 
-        quota = trial_quota_status(student)
+        quota = main_exam_quota_status(
+            student,
+            exam.course,
+            exam.number_of_questions,
+        )
         return Response({
             "status": "can_start" if quota['can_start'] else "quota_reached",
             "status_message": "يمكنك البدء" if quota['can_start'] else "تم بلوغ الحد المسموح للمحاولات",
@@ -209,7 +224,7 @@ class StartExam(APIView):
     def get(self, request, exam_id: int) -> Response:
         student = request.user.student
         exam = get_object_or_404(Exam, pk=exam_id, student=student)
-        Student.objects.select_for_update().get(pk=student.pk)
+        student = Student.objects.select_for_update().get(pk=student.pk)
 
         questions = self._get_exam_questions(exam)
         if len(questions) != exam.number_of_questions:
@@ -229,7 +244,11 @@ class StartExam(APIView):
             result_trial = unsubmitted_trial
             resuming = True
         else:
-            quota = trial_quota_status(student)
+            quota = main_exam_quota_status(
+                student,
+                exam.course,
+                exam.number_of_questions,
+            )
             if not quota['can_start']:
                 return Response(
                     {"error": "Trial quota reached.", "quota": quota},
@@ -242,7 +261,10 @@ class StartExam(APIView):
             result_trial = ResultTrial.objects.create(
                 result=result,
                 trial=result.trial,
-                student_started_exam_at=timezone.now()
+                student_started_exam_at=timezone.now(),
+                submitted_by_unsubscribed_user=(
+                    quota['access_type'] == 'unsubscribed'
+                ),
             )
             resuming = False
 
@@ -256,7 +278,6 @@ class StartExam(APIView):
             "exam_title": exam.title,
             "exam_time_limit": exam.time_limit,
             "questions": question_data,
-            "exam_model": None,
             "resuming": resuming,
             "trial_id": result_trial.id,
             "started_at": result_trial.student_started_exam_at,
@@ -280,31 +301,41 @@ class SubmitExam(APIView):
             content_hash = hashlib.md5(str(sorted(request.data.items())).encode()).hexdigest()
             idempotency_key = f"{student.id}_{exam_id}_{content_hash}"
 
-        # Get all unique question IDs from the request
-        question_ids = set()
+        # Validate every question reference sent by the frontend. The actual
+        # grading loop below uses the complete frozen exam question set so a
+        # question omitted from the payload is still recorded as unanswered.
+        submitted_question_ids = set()
         for key in request.data.keys():
-            if key.startswith('question_id_'):
-                question_ids.add(int(key.split('_')[-1]))
-            elif key == 'question_id':  # Handle case where it's not numbered
-                question_ids.add(int(request.data[key]))
-
-        # Check for empty payload (no questions submitted)
-        if not question_ids:
-            return Response(
-                {"error": "يرجى إرسال إجابات للأسئلة"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
+            try:
+                if key.startswith('question_id_'):
+                    submitted_question_ids.add(int(key.rsplit('_', 1)[-1]))
+                elif key.startswith('selected_answer_id_'):
+                    submitted_question_ids.add(int(key.rsplit('_', 1)[-1]))
+                elif key == 'question_id':
+                    submitted_question_ids.add(int(request.data[key]))
+            except (TypeError, ValueError):
+                return Response(
+                    {"error": f"Invalid question reference: {key}"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
 
         exam_questions = {
             question.id: question
             for question in Question.objects.filter(
-                id__in=question_ids,
                 question_type=QuestionType.MCQ,
                 exam_questions__exam=exam,
                 exam_questions__is_active=True,
             ).distinct()
         }
-        invalid_question_ids = sorted(question_ids - set(exam_questions))
+        if not exam_questions:
+            return Response(
+                {"error": "This exam has no active MCQ questions."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        invalid_question_ids = sorted(
+            submitted_question_ids - set(exam_questions)
+        )
         if invalid_question_ids:
             return Response(
                 {
@@ -314,22 +345,25 @@ class SubmitExam(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Get or create Result and ResultTrial with select_for_update to prevent race conditions
-        try:
-            result = get_object_or_404(Result.objects.select_for_update(), student=student, exam=exam)
-            result_trial = result.trials.select_for_update().filter(trial=result.trial).first()
-            if not result_trial:
-                return Response(
-                    {"error": "لم يتم العثور على محاولة نشطة لهذا الامتحان"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-        except Exception as e:
-            import logging
-            logger = logging.getLogger(__name__)
-            logger.error(f"Error retrieving result/trial for student {student.id}, exam {exam_id}: {str(e)}")
+        # Submissions are only valid after StartExam has created the result and
+        # its current trial. Missing state is a client-flow error, not a server
+        # failure.
+        result = Result.objects.select_for_update().filter(
+            student=student,
+            exam=exam,
+        ).first()
+        if result is None:
             return Response(
-                {"error": "تعذر استرداد جلسة الامتحان"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                {"error": "يجب بدء الامتحان قبل إرسال الإجابات"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        result_trial = result.trials.select_for_update().filter(
+            trial=result.trial
+        ).first()
+        if result_trial is None:
+            return Response(
+                {"error": "لم يتم العثور على محاولة نشطة لهذا الامتحان"},
+                status=status.HTTP_400_BAD_REQUEST,
             )
         
         # prevent duplicate submissions for completed trials
@@ -343,8 +377,7 @@ class SubmitExam(APIView):
             )
 
         # Process each question using update_or_create for better performance
-        for question_id in question_ids:
-            question = exam_questions[question_id]
+        for question_id, question in exam_questions.items():
             if question.question_type == QuestionType.MCQ:
                 # Process MCQ answer
                 selected_answer_id = request.data.get(f"selected_answer_id_{question_id}")
@@ -362,10 +395,13 @@ class SubmitExam(APIView):
                             'is_correct': False
                         }
                     )
-                    StudentBank.objects.get_or_create(
+                    StudentBank.objects.update_or_create(
                         student=student,
                         question=question,
-                        defaults={"add_reason": AddReasonChoices.UNSOLVED}
+                        defaults={
+                            "add_reason": AddReasonChoices.UNSOLVED,
+                            "is_solved_now": False,
+                        },
                     )
                     continue
                 try:
@@ -391,10 +427,13 @@ class SubmitExam(APIView):
                     
                     if not submission.is_correct:
 
-                        StudentBank.objects.get_or_create(
+                        StudentBank.objects.update_or_create(
                             student=student,
                             question=question,
-                            defaults={"add_reason": AddReasonChoices.INCORRECT}
+                            defaults={
+                                "add_reason": AddReasonChoices.INCORRECT,
+                                "is_solved_now": False,
+                            },
                         )
 
                 except (ValueError, Http404):
@@ -411,10 +450,13 @@ class SubmitExam(APIView):
                             'is_correct': False
                         }
                     )
-                    StudentBank.objects.get_or_create(
+                    StudentBank.objects.update_or_create(
                         student=student,
                         question=question,
-                        defaults={"add_reason": AddReasonChoices.UNSOLVED}
+                        defaults={
+                            "add_reason": AddReasonChoices.UNSOLVED,
+                            "is_solved_now": False,
+                        },
                     )
         # Calculate scores
         try:
@@ -429,7 +471,6 @@ class SubmitExam(APIView):
             result_trial.exam_score = exam_score
             result_trial.student_submitted_exam_at = timezone.now()
             result_trial.submit_type = submit_type
-            result_trial.submitted_by_unsubscribed_user = False
             result_trial.save()
 
         except Exception as e:
@@ -464,8 +505,6 @@ class StudentExamResultsView(generics.ListAPIView):
 
     def get_queryset(self):
         student = self.request.user.student
-        now = timezone.now()
-
         return Result.objects.filter(
             student=student,
             trials__isnull=False,
@@ -475,27 +514,15 @@ class StudentExamResultsView(generics.ListAPIView):
             'exam__unit',
             'student',
             'student__user',
-            'exam_model'
         ).prefetch_related(
             Prefetch(
                 'trials',
                 queryset=ResultTrial.objects.order_by('-trial')
-                    .select_related('exam_model')
             ),
             Prefetch(
                 'exam__exam_questions',
                 queryset=ExamQuestion.objects.select_related('question')
             ),
-            # Prefetch(  # Commented out as not needed
-            #     'exam__submissions',
-            #     queryset=Submission.objects.filter(student=student)
-            #         .select_related('question', 'selected_answer', 'result_trial')
-            # ),
-            Prefetch(
-                'exam_model__model_questions',
-                queryset=ExamModelQuestion.objects.all(),
-                to_attr='prefetched_model_questions'
-            )
         ).distinct().order_by('-added')
 
 
@@ -516,6 +543,11 @@ class GetMyExamResult(APIView):
         # Fetch the result and active trial
         result = get_object_or_404(Result, student=student, exam=exam)
         active_trial = result.active_trial
+        if not active_trial:
+            return Response(
+                {"error": "No trial exists for this exam result."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
 
         # Fetch MCQ submissions and prefetch correct answers for each question
         mcq_submissions = Submission.objects.filter(
@@ -530,22 +562,12 @@ class GetMyExamResult(APIView):
             )
         )
 
-        # Fetch Essay submissions
-        essay_submissions = EssaySubmission.objects.filter(
-            student=student, exam=exam, result_trial=active_trial
-        ).select_related('question', 'question__category')
-
         # Calculate counts
         correct_mcq_count = mcq_submissions.filter(is_correct=True).count()
         incorrect_mcq_count = mcq_submissions.filter(is_correct=False, is_solved=True).count()
         unsolved_mcq_count = mcq_submissions.filter(is_solved=False).count()
-        correct_essay_count = essay_submissions.filter(is_scored=True, score__gt=0).count()
-        incorrect_essay_count = essay_submissions.filter(is_scored=True, score=0).count()
-        unscored_essay_count = essay_submissions.filter(is_scored=False).count()
 
         student_answers = []
-        unsolved_questions = []
-        unscored_essay_questions = []
 
         # Process MCQ submissions
         for submission in mcq_submissions:
@@ -599,53 +621,6 @@ class GetMyExamResult(APIView):
             # if not submission.is_solved:
             #     unsolved_questions.append(answer_data)
 
-        # Process Essay submissions
-        for submission in essay_submissions:
-            question = submission.question
-            answer_data = {
-                "submission_id": submission.id,
-                "type": "essay",
-                "question_id": question.id if question else None,
-                "question_category": question.category.title if question and question.category else None,
-                "question_category_id": question.category.id if question and question.category else None,
-                "question_text": question.text if question else None,
-                "question_image": _first_question_image_url(question),
-                "question_images": _question_images_payload(question),
-                "question_comment": question.comment,
-                "question_years": [
-                    {"id": y.id, "value": y.value} for y in question.years.all()
-                ] if question else [],
-                **_question_explanation_fields(question),
-                "answer_text": submission.answer_text,
-                "answer_file": submission.answer_file.url if submission.answer_file else None,
-                "score": submission.score,
-                "is_scored": submission.is_scored,
-                "points": question.points,
-            }
-            student_answers.append(answer_data)
-
-        # Fetch correct answers (can be kept for a separate summary if needed)
-        questions = Question.objects.filter(exam_questions__exam=exam).distinct()
-        correct_answers_summary = [
-            {
-                "question_id": question.id,
-                "question_text": question.text,
-                "question_image": _first_question_image_url(question),
-                "question_images": _question_images_payload(question),
-                "question_type": question.question_type,
-                "question_comment": question.comment,
-                "question_years": [
-                    {"id": y.id, "value": y.value} for y in question.years.all()
-                ],
-                **_question_explanation_fields(question),
-                "correct_answers": [
-                    {"text": answer.text, "image": answer.image.url if answer.image else None}
-                    for answer in question.answers.filter(is_correct=True)
-                ],
-            }
-            for question in questions
-        ]
-
         # Response payload
         response_data = {
             "active_trial": active_trial.id,
@@ -659,19 +634,12 @@ class GetMyExamResult(APIView):
             "student_trials": result.trial,
             "is_trials_finished": result.is_trials_finished,
             # Counts
-            "number_of_essay": essay_submissions.count(),
             "number_of_mcq": mcq_submissions.count(),
             "correct_mcq_count": correct_mcq_count,
             "incorrect_mcq_count": incorrect_mcq_count,
             "unsolved_mcq_count": unsolved_mcq_count,
-            "correct_essay_count": correct_essay_count,
-            "incorrect_essay_count": incorrect_essay_count,
-            "unscored_essay_count": unscored_essay_count,
             # Other data
             "student_answers": student_answers,
-            # "unsolved_questions": unsolved_questions,
-            # "unscored_essay_questions": unscored_essay_questions,
-            # "correct_answers_summary": correct_answers_summary, # Renamed for clarity
             "student_started_exam_at": active_trial.student_started_exam_at if active_trial else None,
             "student_submitted_exam_at": active_trial.student_submitted_exam_at if active_trial else None,
             "submit_type": active_trial.submit_type if active_trial else None,
@@ -710,18 +678,10 @@ class GetMyExamResultForTrial(APIView):
         ).order_by("id")
 
 
-        # Fetch Essay submissions
-        essay_submissions = EssaySubmission.objects.filter(
-            student=student, exam=exam, result_trial=trial
-        ).select_related('question', 'question__category')
-
         # Calculate counts
         correct_mcq_count = mcq_submissions.filter(is_correct=True).count()
         incorrect_mcq_count = mcq_submissions.filter(is_correct=False, is_solved=True).count()
         unsolved_mcq_count = mcq_submissions.filter(is_solved=False).count()
-        correct_essay_count = essay_submissions.filter(is_scored=True, score__gt=0).count()
-        incorrect_essay_count = essay_submissions.filter(is_scored=True, score=0).count()
-        unscored_essay_count = essay_submissions.filter(is_scored=False).count()
 
         student_answers = []
 
@@ -774,53 +734,6 @@ class GetMyExamResultForTrial(APIView):
             }
             student_answers.append(answer_data)
 
-        # Process Essay submissions
-        for submission in essay_submissions:
-            question = submission.question
-            answer_data = {
-                "submission_id": submission.id,
-                "type": "essay",
-                "question_id": question.id if question else None,
-                "question_category": question.category.title if question and question.category else None,
-                "question_category_id": question.category.id if question and question.category else None,
-                "question_text": question.text if question else None,
-                "question_image": _first_question_image_url(question),
-                "question_images": _question_images_payload(question),
-                "question_comment": question.comment,
-                "question_years": [
-                    {"id": y.id, "value": y.value} for y in question.years.all()
-                ] if question else [],
-                **_question_explanation_fields(question),
-                "answer_text": submission.answer_text,
-                "answer_file": submission.answer_file.url if submission.answer_file else None,
-                "score": submission.score,
-                "is_scored": submission.is_scored,
-                "points": question.points,
-            }
-            student_answers.append(answer_data)
-
-        # Fetch correct answers (can be kept for a separate summary if needed)
-        questions = Question.objects.filter(exam_questions__exam=exam).distinct()
-        correct_answers_summary = [
-            {
-                "question_id": question.id,
-                "question_text": question.text,
-                "question_image": _first_question_image_url(question),
-                "question_images": _question_images_payload(question),
-                "question_type": question.question_type,
-                "question_comment": question.comment,
-                "question_years": [
-                    {"id": y.id, "value": y.value} for y in question.years.all()
-                ],
-                **_question_explanation_fields(question),
-                "correct_answers": [
-                    {"text": answer.text, "image": answer.image.url if answer.image else None}
-                    for answer in question.answers.filter(is_correct=True)
-                ],
-            }
-            for question in questions
-        ]
-
         # Determine if the student succeeded in this trial
         is_succeeded = False
         if trial.exam_score and trial.score is not None:
@@ -839,14 +752,10 @@ class GetMyExamResultForTrial(APIView):
             "student_trials": trial.result.trial if trial else 0,
             "is_trials_finished": trial.result.is_trials_finished if trial else False,
             # Counts
-            "number_of_essay": essay_submissions.count(),
             "number_of_mcq": mcq_submissions.count(),
             "correct_mcq_count": correct_mcq_count,
             "incorrect_mcq_count": incorrect_mcq_count,
             "unsolved_mcq_count": unsolved_mcq_count,
-            "correct_essay_count": correct_essay_count,
-            "incorrect_essay_count": incorrect_essay_count,
-            "unscored_essay_count": unscored_essay_count,
             # Other data
             "student_answers": student_answers,
             "student_started_exam_at": trial.student_started_exam_at if trial else None,
@@ -861,82 +770,51 @@ class GetMyExamResultForTrial(APIView):
 #^-------------------------------- {Student Temp Exams} ---------------------------------#
 
 class StudentBankListView(generics.ListAPIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasStudentProfile]
     serializer_class = StudentBankSerializer
     filter_backends = [DjangoFilterBackend, SearchFilter]
-    filterset_fields = ['add_reason', 'is_solved_now', 'question__question_type']
+    filterset_class = StudentBankFilter
     search_fields = ['question__text']
 
     def get_queryset(self):
         student = self.request.user.student
         
-        # Optimized base queryset with selective field loading and proper joins
+        # Load the complete normal question payload, including the new
+        # QuestionImage relation, without per-row answer/image/year queries.
         queryset = StudentBank.objects.filter(student=student).select_related(
             'question',
             'question__course',
             'question__unit', 
             'question__category'
-        ).only(
-            # StudentBank fields
-            'id', 'add_reason', 'is_solved_now', 'created',
-            # Question fields (minimal needed for serialization)
-            'question__id', 'question__text', 'question__explanation_text',
-            'question__explanation_video_url', 'question__explanation_recorded_audio', 'question__points',
-            'question__question_type',
-            # Related fields for filtering
-            'question__course__id', 'question__course__name',
-            'question__unit__id', 'question__unit__name',
-            'question__category__id', 'question__category__title'
+        ).prefetch_related(
+            'question__answers',
+            'question__images',
+            'question__years',
         )
         
-        # Apply filters efficiently using indexed fields
-        course = self.request.query_params.get('course')
-        unit = self.request.query_params.get('unit')
-
-        if course:
-            queryset = queryset.filter(question__course_id=course)
-        if unit:
-            queryset = queryset.filter(question__unit__id=unit)
-
-        # Use indexed ordering
-        return queryset.order_by('-created')
+        return queryset.distinct().order_by('-created')
 
 class CreateTempExam(APIView):
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, HasStudentProfile]
 
-    def _sample_student_banks(self, base_queryset, k, exclude_ids=None):
-        """Efficiently sample ~k StudentBank rows using optimized ID-range probing.
-        Returns a list of StudentBank with question and filtered similar_questions prefetched.
-        """
+    def _sample_student_banks(self, base_queryset, k):
+        """Select exactly ``k`` mistake rows and preload their question payload."""
         qs = base_queryset
-        if exclude_ids:
-            qs = qs.exclude(id__in=exclude_ids)
-        
-        # Fast aggregation using indexes
         agg = qs.aggregate(min_id=Min('id'), max_id=Max('id'), total_count=Count('id'))
         min_id, max_id, total_count = agg.get('min_id'), agg.get('max_id'), agg.get('total_count', 0)
-        
+
         if min_id is None or max_id is None or total_count == 0:
             return []
 
         chosen_ids = set()
-        
-        # Optimized sampling strategy based on dataset size
         if total_count <= k * 2:
-            # For small datasets, just get all IDs efficiently
             all_ids = list(qs.values_list('id', flat=True))
-            if len(all_ids) <= k:
-                chosen_ids = set(all_ids)
-            else:
-                chosen_ids = set(random.sample(all_ids, k))
+            chosen_ids = set(random.sample(all_ids, min(k, len(all_ids))))
         else:
-            # For large datasets, use ID-range probing with optimized attempts
             attempts = 0
-            max_attempts = min(k * 3, 100)  # Reduced attempts for better performance
-            
+            max_attempts = min(k * 5, 200)
             while len(chosen_ids) < k and attempts < max_attempts:
                 r = random.randint(min_id, max_id)
-                # Single query to find candidate
                 candidate = qs.filter(id__gte=r).values_list('id', flat=True).first()
                 if candidate is None and r > min_id:
                     candidate = qs.filter(id__lt=r).order_by('-id').values_list('id', flat=True).first()
@@ -944,123 +822,59 @@ class CreateTempExam(APIView):
                     chosen_ids.add(candidate)
                 attempts += 1
 
-        if not chosen_ids:
-            return []
+        # Sparse ID ranges can make probing return fewer than requested. Fill
+        # the remainder deterministically without loading the whole bank.
+        if len(chosen_ids) < k:
+            missing = k - len(chosen_ids)
+            fallback_ids = qs.exclude(id__in=chosen_ids).order_by('id').values_list(
+                'id', flat=True
+            )[:missing]
+            chosen_ids.update(fallback_ids)
 
-        # Optimized bulk fetch with minimal fields and proper prefetching
-        return list(
-            StudentBank.objects.filter(id__in=chosen_ids)
-            .select_related('question')
-            .prefetch_related(
-                Prefetch(
-                    'question__similar_questions',
-                    queryset=Question.objects.filter(
-                        is_active=True, 
-                        question_type=QuestionType.MCQ
-                    ).only('id', 'text', 'explanation_text', 'explanation_video_url', 'explanation_recorded_audio', 'points', 'image', 'comment', 'difficulty')
+        chosen_ids = list(chosen_ids)
+        random.shuffle(chosen_ids)
+        bank_items = {
+            item.id: item
+            for item in (
+                StudentBank.objects.filter(id__in=chosen_ids)
+                .select_related(
+                    'question',
+                    'question__course',
+                    'question__unit',
+                    'question__category',
+                )
+                .prefetch_related(
+                    'question__answers',
+                    'question__images',
+                    'question__years',
                 )
             )
-            .only('id', 'student_id', 'question_id', 'is_solved_now')
-        )
+        }
+        return [bank_items[item_id] for item_id in chosen_ids if item_id in bank_items]
 
-    def _get_similar_questions_for_temp_exam(self, student_bank_questions):
-        """
-        Optimized similar question selection with reduced database complexity.
-        Returns a list of Question objects with no duplicates.
-        """
-        if not student_bank_questions:
-            return []
-            
-        selected_questions = []
-        used_question_ids = set()
-
-        # Cache for similar questions to avoid repeated DB hits
-        similar_questions_cache = {}
-        
-        for student_bank in student_bank_questions:
-            original_question = student_bank.question
-            original_id = original_question.id
-
-            # Try to get a similar question
-            selected_question = None
-            
-            # Check cache first
-            if original_id not in similar_questions_cache:
-                # Prefetch similar questions efficiently
-                try:
-                    similars = list(original_question.similar_questions.filter(
-                        is_active=True, 
-                        question_type=QuestionType.MCQ
-                    ).only('id', 'text', 'explanation_text', 'explanation_video_url', 'explanation_recorded_audio', 'points', 'image', 'comment', 'difficulty')[:10])  # Limit to first 10
-                    similar_questions_cache[original_id] = similars
-                except Exception:
-                    similar_questions_cache[original_id] = []
-            
-            # Get available similar questions (not already used)
-            available_similars = [
-                q for q in similar_questions_cache[original_id] 
-                if q.id not in used_question_ids
-            ]
-            
-            # Select question: prefer similar, fallback to original
-            if available_similars:
-                selected_question = random.choice(available_similars)
-            elif original_id not in used_question_ids:
-                selected_question = original_question
-
-            # Add to selection if valid
-            if selected_question and selected_question.id not in used_question_ids:
-                selected_questions.append(selected_question)
-                used_question_ids.add(selected_question.id)
-
-        return selected_questions
-
+    @transaction.atomic
     def post(self, request):
-        student = request.user.student
-        number_of_questions = request.data.get('number_of_questions')
-        course = request.data.get('course')
-        unit = request.data.get('unit')
-        time_limit = request.data.get('time_limit', 30)  # Default 30 minutes
-        selected_questions_type = request.data.get('selected_questions_type')
-
-        # Validate input
-        try:
-            number_of_questions = int(number_of_questions)
-            if number_of_questions <= 0:
-                return Response(
-                    {"error": "يجب أن يكون عدد الأسئلة رقماً موجباً"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-        except (ValueError, TypeError):
-            return Response(
-                {"error": "عدد الأسئلة غير صالح"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Validate selected_questions_type
-        if selected_questions_type not in ['solved', 'not_solved', None]:
-            return Response(
-                {"error": "نوع الأسئلة المحدد غير صالح. يجب أن يكون 'solved' أو 'not_solved' أو null"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Optimized daily limit check using indexed fields
-        today = timezone.now().date()
-        limit, created = TempExamAllowedTimes.objects.get_or_create(
-            id=1,
-            defaults={'number_of_allowedtempexams_per_day': 3}
+        # Serialize concurrent creations for one student so two requests cannot
+        # both pass the same calendar-quota check.
+        student = Student.objects.select_for_update().get(
+            pk=request.user.student.pk
         )
+        serializer = TempExamCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        data = serializer.validated_data
+        number_of_questions = data['number_of_questions']
+        course = data.get('course')
+        unit = data.get('unit')
+        category = data.get('category')
+        years = data.get('years', [])
+        add_reason = data.get('add_reason')
+        selected_questions_type = data.get('selected_questions_type')
 
-        # Single query for count with indexed date field
-        used_attempts = TempExam.objects.filter(
-            student=student,
-            created__date=today
-        ).count()
-
-        if used_attempts >= limit.number_of_allowedtempexams_per_day:
+        quota = temp_exam_quota_status(student)
+        if not quota['can_start']:
             return Response(
-                {"error": f"已达到每日临时考试限制 ({limit.number_of_allowedtempexams_per_day} 次)"},
-                status=status.HTTP_400_BAD_REQUEST
+                {"error": "Temp exam quota reached.", "quota": quota},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
             )
 
         # Build optimized base queryset with early filtering and minimal field selection
@@ -1079,11 +893,16 @@ class CreateTempExam(APIView):
         elif selected_questions_type == 'not_solved':
             queryset = queryset.filter(is_solved_now=False)
 
-        # Chain filters efficiently to leverage composite indexes
+        if add_reason:
+            queryset = queryset.filter(add_reason=add_reason)
         if course:
-            queryset = queryset.filter(question__course_id=course)
+            queryset = queryset.filter(question__course=course)
         if unit:
-            queryset = queryset.filter(question__unit__id=unit)
+            queryset = queryset.filter(question__unit=unit)
+        if category:
+            queryset = queryset.filter(question__category=category)
+        if years:
+            queryset = queryset.filter(question__years__in=years).distinct()
 
         # Fast count using optimized queryset
         total_available = queryset.count()
@@ -1093,79 +912,42 @@ class CreateTempExam(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Optimized sampling with reduced complexity
+        # Select the exact mistake questions. Similar-question substitution is
+        # intentionally not used for student temp exams.
         selected_student_banks = self._sample_student_banks(queryset, number_of_questions)
-
-        # Efficient similar question selection
-        selected_questions = self._get_similar_questions_for_temp_exam(selected_student_banks)
-        selected_question_ids = {q.id for q in selected_questions}
-
-        # Simplified top-up strategy with reduced iterations
-        if len(selected_questions) < number_of_questions:
-            need = number_of_questions - len(selected_questions)
-            used_bank_ids = {sb.id for sb in selected_student_banks}
-            
-            # Single additional sampling attempt
-            additional_banks = self._sample_student_banks(
-                queryset, 
-                min(need * 2, 50),  # Cap additional sampling
-                exclude_ids=used_bank_ids
-            )
-            
-            if additional_banks:
-                additional_questions = self._get_similar_questions_for_temp_exam(additional_banks)
-                for q in additional_questions:
-                    if q.id not in selected_question_ids and len(selected_questions) < number_of_questions:
-                        selected_questions.append(q)
-                        selected_question_ids.add(q.id)
-
-        # Final validation with clear error message
-        if len(selected_questions) < number_of_questions:
+        if len(selected_student_banks) < number_of_questions:
             return Response(
-                {"error": f"Could not generate enough unique questions. Generated {len(selected_questions)}, required {number_of_questions}"},
+                {
+                    "error": (
+                        "Could not select enough unique mistake questions. "
+                        f"Selected {len(selected_student_banks)}, "
+                        f"required {number_of_questions}"
+                    )
+                },
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        related_objects = {}
-        if course:
-            related_objects['course'] = Course.objects.filter(id=course).only('id').first()
-        if unit:
-            related_objects['unit'] = Unit.objects.filter(id=unit).only('id').first()
-
         temp_exam = TempExam.objects.create(
             student=student,
-            course=related_objects.get('course'),
-            unit=related_objects.get('unit'),
+            course=course,
+            unit=unit,
+            category=category,
             number_of_questions=number_of_questions,
-            time_limit=time_limit,
-            selected_questions_type=selected_questions_type
+            time_limit=data['time_limit'],
+            selected_questions_type=selected_questions_type,
+            add_reason=add_reason,
         )
+        temp_exam.years.set(years)
+        temp_exam.student_bank_items.set(selected_student_banks)
 
-        # Optimized answer loading with single bulk query
-        final_questions = selected_questions[:number_of_questions]
-        final_question_ids = [q.id for q in final_questions]
-        
-        # Single optimized query for all answers
-        answers_dict = {}
-        if final_question_ids:
-            answers = Answer.objects.filter(
-                question_id__in=final_question_ids
-            ).select_related().only(
-                'id', 'text', 'image', 'is_correct', 'question_id'
-            ).order_by('question_id', 'id')
-            
-            # Group answers by question efficiently
-            for answer in answers:
-                if answer.question_id not in answers_dict:
-                    answers_dict[answer.question_id] = []
-                answers_dict[answer.question_id].append(answer)
-        
-        # Attach answers to questions for serialization
-        for question in final_questions:
-            question._prefetched_answers = answers_dict.get(question.id, [])
-        
-        # Serialize with optimized data
-        question_data = [QuestionSerializerWithCorrectAnswer(q).data for q in final_questions]
+        final_questions = [
+            student_bank.question for student_bank in selected_student_banks
+        ]
+        question_data = QuestionSerializerWithCorrectAnswer(
+            final_questions,
+            many=True,
+            context={"request": request},
+        ).data
 
         return Response({
             "temp_exam_id": temp_exam.id,
@@ -1173,13 +955,72 @@ class CreateTempExam(APIView):
             "time_limit": temp_exam.time_limit,
             "course": temp_exam.course.id if temp_exam.course else None,
             "unit": temp_exam.unit.id if temp_exam.unit else None,
+            "category": temp_exam.category.id if temp_exam.category else None,
+            "years": [year.id for year in years],
+            "add_reason": temp_exam.add_reason,
             "selected_questions_type": temp_exam.selected_questions_type,
-            "questions": question_data
+            "questions": question_data,
+            "quota": temp_exam_quota_status(student),
         }, status=status.HTTP_201_CREATED)
 
-class SubmitTempExamResults(APIView):
-    permission_classes = [IsAuthenticated]
 
+def _student_temp_exam_queryset(student):
+    bank_items = StudentBank.objects.select_related(
+        'question',
+        'question__course',
+        'question__unit',
+        'question__category',
+    ).prefetch_related(
+        'question__answers',
+        'question__images',
+        'question__years',
+    ).order_by('id')
+    return TempExam.objects.filter(student=student).select_related(
+        'course', 'unit', 'category'
+    ).prefetch_related(
+        'years',
+        Prefetch('student_bank_items', queryset=bank_items),
+    ).order_by('-created', '-id')
+
+
+class StudentTempExamListView(generics.ListAPIView):
+    permission_classes = [IsAuthenticated, HasStudentProfile]
+    serializer_class = TempExamListSerializer
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_fields = [
+        'course',
+        'unit',
+        'category',
+        'years',
+        'add_reason',
+        'selected_questions_type',
+    ]
+    search_fields = [
+        'course__name',
+        'unit__name',
+        'category__title',
+        'years__value',
+        'student_bank_items__question__text',
+    ]
+    ordering_fields = ['created', 'number_of_questions', 'time_limit', 'result']
+    ordering = ['-created', '-id']
+
+    def get_queryset(self):
+        return _student_temp_exam_queryset(self.request.user.student).distinct()
+
+
+class StudentTempExamDetailView(generics.RetrieveAPIView):
+    permission_classes = [IsAuthenticated, HasStudentProfile]
+    serializer_class = TempExamDetailSerializer
+
+    def get_queryset(self):
+        return _student_temp_exam_queryset(self.request.user.student)
+
+
+class SubmitTempExamResults(APIView):
+    permission_classes = [IsAuthenticated, HasStudentProfile]
+
+    @transaction.atomic
     def post(self, request):
         student = request.user.student
         temp_exam_id = request.data.get('temp_exam_id')
@@ -1200,347 +1041,114 @@ class SubmitTempExamResults(APIView):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Optimized temp exam retrieval with minimal fields
+        if correct_question_ids is None:
+            correct_question_ids = []
+        if not isinstance(correct_question_ids, (list, tuple)):
+            return Response(
+                {"error": "correct_question_ids must be a list of question IDs"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            correct_question_ids = sorted({
+                int(question_id) for question_id in correct_question_ids
+            })
+        except (TypeError, ValueError):
+            return Response(
+                {"error": "correct_question_ids must contain valid integers"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if any(question_id <= 0 for question_id in correct_question_ids):
+            return Response(
+                {"error": "correct_question_ids must contain positive integers"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if result is None:
+            return Response(
+                {"error": "result is required and must be the raw correct-answer count."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        try:
+            numeric_result = float(result)
+        except (ValueError, TypeError):
+            return Response(
+                {"error": "result must be a whole-number raw score."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not numeric_result.is_integer():
+            return Response(
+                {"error": "result must be a whole-number raw score."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        result_score = int(numeric_result)
+        if result_score < 0:
+            return Response(
+                {"error": "result cannot be less than zero."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         temp_exam = get_object_or_404(
-            TempExam.objects.only('id', 'student_id', 'result'),
-            id=temp_exam_id, 
+            TempExam.objects.select_for_update().only(
+                'id', 'student_id', 'result', 'number_of_questions'
+            ),
+            id=temp_exam_id,
             student=student
         )
 
-        # Batch update for better performance - single query instead of multiple
-        if correct_question_ids:
-            updated_count = StudentBank.objects.filter(
-                student=student,
-                question__id__in=correct_question_ids,
-                is_solved_now=False  # Only update if not already solved
-            ).update(is_solved_now=True)
-        
-        # Optimized result update with validation
-        if result is not None:
-            try:
-                result_float = float(result)
-                if temp_exam.result != result_float:  # Only update if changed
-                    temp_exam.result = result_float
-                    temp_exam.save(update_fields=['result'])  # Save only specific field
-            except (ValueError, TypeError):
-                return Response(
-                    {"error": "Invalid result format. Must be a number."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+        selected_question_ids = set(
+            temp_exam.student_bank_items.values_list('question_id', flat=True)
+        )
+        invalid_question_ids = sorted(
+            set(correct_question_ids) - selected_question_ids
+        )
+        if invalid_question_ids:
+            return Response(
+                {
+                    "error": "All correct questions must belong to this temp exam.",
+                    "invalid_question_ids": invalid_question_ids,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if result_score > temp_exam.number_of_questions:
+            return Response(
+                {
+                    "error": (
+                        "result cannot exceed the temp exam question count "
+                        f"({temp_exam.number_of_questions})."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if result_score != len(correct_question_ids):
+            return Response(
+                {
+                    "error": (
+                        "result must equal the number of unique "
+                        "correct_question_ids."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if temp_exam.result is not None and temp_exam.result != result_score:
+            return Response(
+                {"error": "Temp exam results have already been submitted."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        updated_count = temp_exam.student_bank_items.filter(
+            student=student,
+            question_id__in=correct_question_ids,
+            is_solved_now=False,
+        ).update(is_solved_now=True)
+
+        if temp_exam.result is None:
+            temp_exam.result = result_score
+            temp_exam.save(update_fields=['result'])
 
         return Response({
             "message": "Temp exam results submitted successfully",
             "temp_exam_id": temp_exam.id,
             "result": temp_exam.result,
-            "updated_questions": len(correct_question_ids) if correct_question_ids else 0
+            "updated_questions": updated_count,
         }, status=status.HTTP_200_OK)
-
-
-#^-------------------------------- {Student Created Exams} ---------------------------------^#
-
-
-class AdminQuestionBankListView(generics.ListAPIView):
-    """List view for admin question bank - for admin users only"""
-    serializer_class = AdminQuestionBankSerializer
-    permission_classes = [IsAdminUser]
-    filter_backends = [DjangoFilterBackend, SearchFilter]
-    filterset_fields = ['question__question_type', 'question__course', 'question__unit']
-    search_fields = ['question__text']
-
-    def get_queryset(self):
-        return AdminQuestionBank.objects.select_related('question').order_by('-created')
-
-
-class CreateStudentExam(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def _sample_admin_questions(self, base_queryset, k, exclude_ids=None):
-        """Efficiently sample ~k AdminQuestionBank rows using optimized ID-range probing.
-        Returns a list of AdminQuestionBank with question prefetched.
-        """
-        qs = base_queryset
-        if exclude_ids:
-            qs = qs.exclude(id__in=exclude_ids)
-        
-        # Fast aggregation using indexes
-        agg = qs.aggregate(min_id=Min('id'), max_id=Max('id'), total_count=Count('id'))
-        min_id, max_id, total_count = agg.get('min_id'), agg.get('max_id'), agg.get('total_count', 0)
-        
-        if min_id is None or max_id is None or total_count == 0:
-            return []
-
-        chosen_ids = set()
-        
-        # Optimized sampling strategy based on dataset size
-        if total_count <= k * 2:
-            # For small datasets, just get all IDs efficiently
-            all_ids = list(qs.values_list('id', flat=True))
-            if len(all_ids) <= k:
-                chosen_ids = set(all_ids)
-            else:
-                chosen_ids = set(random.sample(all_ids, k))
-        else:
-            # For large datasets, use ID-range probing with optimized attempts
-            attempts = 0
-            max_attempts = min(k * 3, 100)  # Reduced attempts for better performance
-            
-            while len(chosen_ids) < k and attempts < max_attempts:
-                r = random.randint(min_id, max_id)
-                # Single query to find candidate
-                candidate = qs.filter(id__gte=r).values_list('id', flat=True).first()
-                if candidate is None and r > min_id:
-                    candidate = qs.filter(id__lt=r).order_by('-id').values_list('id', flat=True).first()
-                if candidate is not None:
-                    chosen_ids.add(candidate)
-                attempts += 1
-
-        if not chosen_ids:
-            return []
-
-        # Optimized bulk fetch with minimal fields and proper prefetching
-        return list(
-            AdminQuestionBank.objects.filter(id__in=chosen_ids)
-            .select_related('question')
-            .only('id', 'question_id')
-        )
-
-    def post(self, request):
-        student = request.user.student
-        number_of_mcq_questions = request.data.get('number_of_mcq_questions', 0)
-        number_of_essay_questions = request.data.get('number_of_essay_questions', 0)
-        course = request.data.get('course')
-        unit = request.data.get('unit')
-        time_limit = request.data.get('time_limit', 60)  # Default 60 minutes
-
-        # Validate input
-        try:
-            number_of_mcq_questions = int(number_of_mcq_questions)
-            number_of_essay_questions = int(number_of_essay_questions)
-            time_limit = int(time_limit)
-            
-            if number_of_mcq_questions < 0 or number_of_essay_questions < 0:
-                return Response(
-                    {"error": "Number of questions must be non-negative"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            if number_of_mcq_questions + number_of_essay_questions == 0:
-                return Response(
-                    {"error": "Total number of questions must be greater than 0"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-                
-        except (ValueError, TypeError):
-            return Response(
-                {"error": "Invalid number format"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Check daily limit using the same limit as TempExam
-        today = timezone.now().date()
-        limit, created = TempExamAllowedTimes.objects.get_or_create(
-            id=1,
-            defaults={'number_of_allowedtempexams_per_day': 3}
-        )
-        
-        # Count both temp exams and student created exams for the daily limit
-        used_attempts = (
-            TempExam.objects.filter(student=student, created__date=today).count() +
-            StudentCreatedExam.objects.filter(student=student, created__date=today).count()
-        )
-
-        if used_attempts >= limit.number_of_allowedtempexams_per_day:
-            return Response(
-                {"error": f"Daily exam limit of {limit.number_of_allowedtempexams_per_day} reached"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Build queryset for admin question bank with early filtering
-        queryset = AdminQuestionBank.objects.filter(
-            question__is_active=True
-        ).select_related('question').only(
-            'id', 'question_id',
-            'question__id', 'question__question_type', 'question__is_active'
-        )
-
-        # Apply filters
-        if course:
-            queryset = queryset.filter(question__course_id=course)
-        if unit:
-            queryset = queryset.filter(question__unit__id=unit)
-
-        # Check availability for MCQ questions
-        mcq_queryset = queryset.filter(question__question_type=QuestionType.MCQ)
-        mcq_available = mcq_queryset.count()
-        
-        if mcq_available < number_of_mcq_questions:
-            return Response(
-                {"error": f"Not enough MCQ questions available. Found {mcq_available}, required {number_of_mcq_questions}"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Check availability for Essay questions
-        essay_queryset = queryset.filter(question__question_type=QuestionType.ESSAY)
-        essay_available = essay_queryset.count()
-        
-        if essay_available < number_of_essay_questions:
-            return Response(
-                {"error": f"Not enough Essay questions available. Found {essay_available}, required {number_of_essay_questions}"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Sample MCQ questions
-        selected_mcq_banks = []
-        if number_of_mcq_questions > 0:
-            selected_mcq_banks = self._sample_admin_questions(mcq_queryset, number_of_mcq_questions)
-
-        # Sample Essay questions
-        selected_essay_banks = []
-        if number_of_essay_questions > 0:
-            selected_essay_banks = self._sample_admin_questions(essay_queryset, number_of_essay_questions)
-
-        # Combine all selected questions
-        all_selected_banks = selected_mcq_banks + selected_essay_banks
-        
-        if len(all_selected_banks) < (number_of_mcq_questions + number_of_essay_questions):
-            return Response(
-                {"error": f"Could not generate enough unique questions. Generated {len(all_selected_banks)}, required {number_of_mcq_questions + number_of_essay_questions}"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Get related objects
-        course_obj = None
-        unit_obj = None
-        if course:
-            course_obj = get_object_or_404(Course, id=course)
-        if unit:
-            unit_obj = get_object_or_404(Unit, id=unit)
-
-        # Calculate total exam score
-        total_score = sum(bank.question.points for bank in all_selected_banks)
-
-        # Create student exam
-        student_exam = StudentCreatedExam.objects.create(
-            student=student,
-            course=course_obj,
-            unit=unit_obj,
-            number_of_mcq_questions=number_of_mcq_questions,
-            number_of_essay_questions=number_of_essay_questions,
-            time_limit=time_limit,
-            exam_score=total_score
-        )
-
-        # Prepare questions data for response - get questions with answers
-        question_ids = [bank.question.id for bank in all_selected_banks]
-        questions_with_answers = Question.objects.filter(
-            id__in=question_ids
-        ).prefetch_related('answers')
-
-        # Shuffle questions to randomize order
-        questions_list = list(questions_with_answers)
-        random.shuffle(questions_list)
-
-        # Serialize questions
-        question_data = [QuestionSerializerWithCorrectAnswer(q).data for q in questions_list]
-
-        return Response({
-            "student_exam_id": student_exam.id,
-            "number_of_mcq_questions": student_exam.number_of_mcq_questions,
-            "number_of_essay_questions": student_exam.number_of_essay_questions,
-            "time_limit": student_exam.time_limit,
-            "exam_score": student_exam.exam_score,
-            "course": student_exam.course.id if student_exam.course else None,
-            "unit": student_exam.unit.id if student_exam.unit else None,
-            "questions": question_data
-        }, status=status.HTTP_201_CREATED)
-
-
-class SubmitStudentExamResults(APIView):
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        student = request.user.student
-        student_exam_id = request.data.get('student_exam_id')
-        result = request.data.get('result')
-
-        # Validate inputs early
-        if not student_exam_id:
-            return Response(
-                {"error": "student_exam_id is required"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        try:
-            student_exam_id = int(student_exam_id)
-        except (TypeError, ValueError):
-            return Response(
-                {"error": "student_exam_id must be a valid integer"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Optimized student exam retrieval with minimal fields
-        student_exam = get_object_or_404(
-            StudentCreatedExam.objects.only('id', 'student_id', 'result', 'exam_score'),
-            id=student_exam_id, 
-            student=student
-        )
-
-        # Check if result already submitted
-        if student_exam.result is not None:
-            return Response(
-                {"error": "Exam results already submitted"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Optimized result update with validation
-        if result is not None:
-            try:
-                result_float = float(result)
-                if result_float < 0:
-                    return Response(
-                        {"error": "Result cannot be negative"},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
-                if result_float > student_exam.exam_score:
-                    return Response(
-                        {"error": f"Result cannot exceed exam score ({student_exam.exam_score})"},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
-                
-                student_exam.result = result_float
-                student_exam.save(update_fields=['result'])  # Save only specific field
-                
-            except (ValueError, TypeError):
-                return Response(
-                    {"error": "Invalid result format. Must be a number."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-        else:
-            return Response(
-                {"error": "Result is required"},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Calculate percentage
-        percentage = (student_exam.result / student_exam.exam_score * 100) if student_exam.exam_score > 0 else 0
-
-        return Response({
-            "message": "Student exam results submitted successfully",
-            "student_exam_id": student_exam.id,
-            "result": student_exam.result,
-            "exam_score": student_exam.exam_score,
-            "percentage": percentage
-        }, status=status.HTTP_200_OK)
-
-
-class StudentCreatedExamListView(generics.ListAPIView):
-    permission_classes = [IsAuthenticated]
-    serializer_class = StudentCreatedExamSerializer
-    filter_backends = [DjangoFilterBackend, SearchFilter]
-    filterset_fields = ['course', 'unit']
-    search_fields = ['course__name', 'unit__name']
-
-    def get_queryset(self):
-        student = self.request.user.student
-        return StudentCreatedExam.objects.filter(
-            student=student
-        ).select_related('course', 'unit').order_by('-created')

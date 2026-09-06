@@ -12,6 +12,14 @@ class Student(models.Model):
     name = models.CharField(max_length=100)
     parent_phone = models.CharField(max_length=20, null=True, blank=True)
     code = models.CharField(max_length=30, blank=True, null=True, unique=True)
+    unsubscribed_exam_max_trials = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Optional lifetime trial limit override for main exams taken without "
+            "a course subscription. Leave empty to use the global configuration."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

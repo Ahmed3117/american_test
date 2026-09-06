@@ -1,27 +1,21 @@
-from django.utils import timezone
 from rest_framework import serializers
 
-from course.models import Course, Unit
 from exam.models import (
-    AdminQuestionBank,
     Answer,
-    EssaySubmission,
     Exam,
     ExamConfig,
-    ExamModel,
     ExamQuestion,
     Question,
     QuestionCategory,
     QuestionImage,
-    RandomExamBank,
-    RelatedToChoices,
     Result,
     ResultTrial,
-    TempExamAllowedTimes,
+    UnsubscribedExamConfig,
     Year,
 )
 from student.models import Student
-from exam.serializer_fields import StoredFileField, stored_file_url
+from exam.serializer_fields import StoredFileField
+from exam.services import unsubscribed_trial_quota_status
 
 
 class QuestionImageSerializer(serializers.ModelSerializer):
@@ -242,6 +236,80 @@ class ExamConfigSerializer(serializers.ModelSerializer):
         return attrs
 
 
+class UnsubscribedExamConfigSerializer(serializers.ModelSerializer):
+    max_trials = serializers.IntegerField(min_value=0)
+    max_questions_per_exam = serializers.IntegerField(min_value=1)
+
+    class Meta:
+        model = UnsubscribedExamConfig
+        fields = ['max_trials', 'max_questions_per_exam']
+
+
+class StudentUnsubscribedExamLimitSerializer(serializers.ModelSerializer):
+    student_id = serializers.IntegerField(source='id', read_only=True)
+    student_name = serializers.CharField(source='name', read_only=True)
+    student_phone = serializers.CharField(source='user.username', read_only=True)
+    max_trials = serializers.IntegerField(
+        source='unsubscribed_exam_max_trials',
+        min_value=0,
+        allow_null=True,
+        required=False,
+    )
+    effective_max_trials = serializers.SerializerMethodField()
+    used_trials = serializers.SerializerMethodField()
+    remaining_trials = serializers.SerializerMethodField()
+    can_start = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Student
+        fields = [
+            'student_id',
+            'student_name',
+            'student_phone',
+            'max_trials',
+            'effective_max_trials',
+            'used_trials',
+            'remaining_trials',
+            'can_start',
+        ]
+
+    def _quota(self, obj):
+        if not hasattr(self, '_quota_cache'):
+            self._quota_cache = {}
+        if obj.id not in self._quota_cache:
+            annotated_usage = getattr(obj, 'unsubscribed_trials_used', None)
+            if annotated_usage is None:
+                quota = unsubscribed_trial_quota_status(obj)
+            else:
+                if not hasattr(self, '_unsubscribed_exam_config'):
+                    self._unsubscribed_exam_config = UnsubscribedExamConfig.load()
+                limit = (
+                    self._unsubscribed_exam_config.max_trials
+                    if obj.unsubscribed_exam_max_trials is None
+                    else obj.unsubscribed_exam_max_trials
+                )
+                quota = {
+                    'limits': {'total': limit},
+                    'usage': {'total': annotated_usage},
+                    'remaining': {'total': max(limit - annotated_usage, 0)},
+                    'can_start': annotated_usage < limit,
+                }
+            self._quota_cache[obj.id] = quota
+        return self._quota_cache[obj.id]
+
+    def get_effective_max_trials(self, obj):
+        return self._quota(obj)['limits']['total']
+
+    def get_used_trials(self, obj):
+        return self._quota(obj)['usage']['total']
+
+    def get_remaining_trials(self, obj):
+        return self._quota(obj)['remaining']['total']
+
+    def get_can_start(self, obj):
+        return self._quota(obj)['can_start']
+
+
 class QuestionCategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = QuestionCategory
@@ -254,72 +322,6 @@ class YearSerializer(serializers.ModelSerializer):
         fields = ["id", "value"]
 
 
-class EssaySubmissionSerializer(serializers.ModelSerializer):
-    answer_file_url = serializers.SerializerMethodField()
-    student_gender = serializers.CharField(source="student.user.gender", read_only=True)
-
-    class Meta:
-        model = EssaySubmission
-        fields = [
-            "id",
-            "student",
-            "student_gender",
-            "exam",
-            "question",
-            "answer_text",
-            "answer_file",
-            "answer_file_url",
-            "score",
-            "is_scored",
-            "created",
-            "result_trial",
-        ]
-        extra_kwargs = {"answer_file": {"write_only": True, "required": False}}
-
-    def get_answer_file_url(self, obj):
-        if not obj.answer_file:
-            return None
-        request = self.context.get("request")
-        return request.build_absolute_uri(obj.answer_file.url) if request else obj.answer_file.url
-
-    def to_representation(self, instance):
-        data = super().to_representation(instance)
-        data["student"] = instance.student.name
-        data["exam"] = instance.exam.title
-        data["question"] = instance.question.text
-        data["question_points"] = instance.question.points
-        data["question_explanation_text"] = instance.question.explanation_text
-        data["question_explanation_video_url"] = stored_file_url(
-            instance.question.explanation_video_url
-        )
-        data["question_explanation_recorded_audio"] = instance.question.explanation_recorded_audio.url if instance.question.explanation_recorded_audio else None
-        data["question_comment"] = instance.question.comment
-        data["question_image"] = (
-            instance.question.images.first().image.url
-            if instance.question.images.first()
-            else None
-        )
-        data["question_images"] = [
-            {"id": qi.id, "image": qi.image.url}
-            for qi in instance.question.images.all()
-        ]
-        return data
-
-
-class RandomExamBankSerializer(serializers.ModelSerializer):
-    questions = QuestionSerializer(many=True, read_only=True)
-
-    class Meta:
-        model = RandomExamBank
-        fields = ["exam", "questions"]
-
-
-class ExamModelSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = ExamModel
-        fields = "__all__"
-
-
 class ResultTrialSerializer(serializers.ModelSerializer):
     class Meta:
         model = ResultTrial
@@ -329,7 +331,6 @@ class ResultTrialSerializer(serializers.ModelSerializer):
             "trial",
             "score",
             "exam_score",
-            "exam_model",
             "submit_type",
             "student_started_exam_at",
             "student_submitted_exam_at",
@@ -359,6 +360,9 @@ class ResultSerializer(serializers.ModelSerializer):
     submit_type = serializers.SerializerMethodField()
     has_unsubscribed_submission = serializers.BooleanField(read_only=True)
     submitted_by_unsubscribed_user = serializers.SerializerMethodField()
+    unsubscribed_exam_max_trials = serializers.SerializerMethodField()
+    unsubscribed_exam_trials_used = serializers.SerializerMethodField()
+    unsubscribed_exam_trials_remaining = serializers.SerializerMethodField()
 
     class Meta:
         model = Result
@@ -383,6 +387,9 @@ class ResultSerializer(serializers.ModelSerializer):
             "submit_type",
             "has_unsubscribed_submission",
             "submitted_by_unsubscribed_user",
+            "unsubscribed_exam_max_trials",
+            "unsubscribed_exam_trials_used",
+            "unsubscribed_exam_trials_remaining",
         ]
 
     def _active_trial(self, obj):
@@ -409,9 +416,45 @@ class ResultSerializer(serializers.ModelSerializer):
         return obj.is_allowed_to_show_result if hasattr(obj, "is_allowed_to_show_result") else False
 
     def get_number_of_allowed_trials(self, obj):
+        trial = self._active_trial(obj)
+        if trial and trial.submitted_by_unsubscribed_user:
+            return self._unsubscribed_quota(obj)['limits']['total']
         if not hasattr(self, '_main_exam_daily_limit'):
             self._main_exam_daily_limit = ExamConfig.load().max_trials_per_day
         return self._main_exam_daily_limit
+
+    def _unsubscribed_quota(self, obj):
+        if not hasattr(self, '_unsubscribed_quota_cache'):
+            self._unsubscribed_quota_cache = {}
+        if obj.student_id not in self._unsubscribed_quota_cache:
+            annotated_usage = getattr(obj, 'unsubscribed_trials_used', None)
+            if annotated_usage is None:
+                quota = unsubscribed_trial_quota_status(obj.student)
+            else:
+                if not hasattr(self, '_unsubscribed_exam_config'):
+                    self._unsubscribed_exam_config = UnsubscribedExamConfig.load()
+                custom_limit = obj.student.unsubscribed_exam_max_trials
+                limit = (
+                    self._unsubscribed_exam_config.max_trials
+                    if custom_limit is None
+                    else custom_limit
+                )
+                quota = {
+                    'limits': {'total': limit},
+                    'usage': {'total': annotated_usage},
+                    'remaining': {'total': max(limit - annotated_usage, 0)},
+                }
+            self._unsubscribed_quota_cache[obj.student_id] = quota
+        return self._unsubscribed_quota_cache[obj.student_id]
+
+    def get_unsubscribed_exam_max_trials(self, obj):
+        return self._unsubscribed_quota(obj)['limits']['total']
+
+    def get_unsubscribed_exam_trials_used(self, obj):
+        return self._unsubscribed_quota(obj)['usage']['total']
+
+    def get_unsubscribed_exam_trials_remaining(self, obj):
+        return self._unsubscribed_quota(obj)['remaining']['total']
 
     def get_student_name(self, obj):
         return getattr(obj.student, "name", getattr(obj, "student_name", ""))
@@ -671,36 +714,6 @@ class CombinedStudentResultSerializer(serializers.ModelSerializer):
         fields = ["id", "name", "gender", "parent_phone", "code", "result"]
 
 
-class CopyExamSerializer(serializers.Serializer):
-    course = serializers.PrimaryKeyRelatedField(queryset=Course.objects.all(), required=False, allow_null=True)
-    unit = serializers.PrimaryKeyRelatedField(queryset=Unit.objects.all(), required=False, allow_null=True)
-    related_to = serializers.ChoiceField(choices=RelatedToChoices.choices)
-
-    def validate(self, attrs):
-        if attrs["related_to"] == RelatedToChoices.COURSE and not attrs.get("course"):
-            raise serializers.ValidationError("Course is required for course exam copies.")
-        if attrs["related_to"] == RelatedToChoices.UNIT and not attrs.get("unit"):
-            raise serializers.ValidationError("Unit is required for unit exam copies.")
-        if attrs.get("unit"):
-            attrs["course"] = attrs["unit"].course
-        return attrs
-
-
-class ExamQuestionReorderSerializer(serializers.Serializer):
-    exam_question = serializers.IntegerField(help_text="ID of the ExamQuestion instance.")
-    new_order = serializers.IntegerField(help_text="The new order value.")
-
-    def validate_exam_question(self, value):
-        if not ExamQuestion.objects.filter(id=value).exists():
-            raise serializers.ValidationError(f"ExamQuestion with ID {value} does not exist.")
-        return value
-
-    def validate_new_order(self, value):
-        if value < 1:
-            raise serializers.ValidationError("New order must be a positive integer.")
-        return value
-
-
 class ExamQuestionSerializer(serializers.ModelSerializer):
     exam_question_id = serializers.IntegerField(source="id", read_only=True)
     question = QuestionSerializer(read_only=True)
@@ -715,38 +728,3 @@ class ExamQuestionSerializer(serializers.ModelSerializer):
         if data.get("question"):
             data["question"]["exam_question_id"] = data["exam_question_id"]
         return data
-
-
-class TempExamAllowedTimesSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = TempExamAllowedTimes
-        fields = ["number_of_allowedtempexams_per_day"]
-
-    def validate_number_of_allowedtempexams_per_day(self, value):
-        if value < 0:
-            raise serializers.ValidationError("Number of allowed temp exams per day cannot be negative.")
-        return value
-
-
-class AdminQuestionBankSerializer(serializers.ModelSerializer):
-    question = serializers.PrimaryKeyRelatedField(queryset=Question.objects.all(), write_only=True)
-    question_details = QuestionSerializer(source="question", read_only=True)
-    question_text = serializers.CharField(source="question.text", read_only=True)
-    question_type = serializers.CharField(source="question.question_type", read_only=True)
-    question_points = serializers.IntegerField(source="question.points", read_only=True)
-
-    class Meta:
-        model = AdminQuestionBank
-        fields = ["id", "question", "question_details", "question_text", "question_type", "question_points", "created"]
-        read_only_fields = ["id", "created"]
-
-
-class AddExamQuestionsSerializer(serializers.Serializer):
-    question_ids = serializers.ListField(child=serializers.IntegerField(min_value=1), allow_empty=False)
-
-    def validate_question_ids(self, value):
-        unique_ids = list(dict.fromkeys(value))
-        existing_count = Question.objects.filter(id__in=unique_ids).count()
-        if existing_count != len(unique_ids):
-            raise serializers.ValidationError("One or more questions do not exist.")
-        return unique_ids

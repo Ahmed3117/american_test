@@ -97,6 +97,25 @@ class PlanSerializer(serializers.ModelSerializer):
         attrs[month_field] = month
 
 
+class StudentPlanSerializer(PlanSerializer):
+    """Plan response enriched with state for the authenticated student."""
+
+    is_ordered = serializers.SerializerMethodField()
+    has_access_now = serializers.SerializerMethodField()
+
+    class Meta(PlanSerializer.Meta):
+        fields = PlanSerializer.Meta.fields + [
+            "is_ordered",
+            "has_access_now",
+        ]
+
+    def get_is_ordered(self, obj):
+        return obj.id in self.context.get("pending_plan_ids", set())
+
+    def get_has_access_now(self, obj):
+        return obj.id in self.context.get("accessible_plan_ids", set())
+
+
 class DiscountCouponSerializer(serializers.ModelSerializer):
     usage_count = serializers.SerializerMethodField()
     remaining_uses = serializers.SerializerMethodField()
@@ -167,6 +186,8 @@ class PlanSubscriptionSerializer(serializers.ModelSerializer):
             "easypay_invoice_sequence",
             "easypay_payment_url",
             "paid_at",
+            "access_starts_on",
+            "access_ends_on",
             "created_at",
         ]
 
