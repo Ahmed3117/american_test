@@ -130,7 +130,7 @@ def main_exam_quota_status(student, course, number_of_questions=None, at=None):
     return quota
 
 
-def select_exam_question_ids(*, course, unit, category, years, difficulty_counts):
+def select_exam_question_ids(*, course, categories, years, difficulty_counts):
     """Select unique active MCQs matching the student's requested breakdown."""
     queryset = Question.objects.filter(
         course=course,
@@ -140,10 +140,8 @@ def select_exam_question_ids(*, course, unit, category, years, difficulty_counts
             difficulty for difficulty, count in difficulty_counts.items() if count
         ],
     )
-    if unit:
-        queryset = queryset.filter(unit=unit)
-    if category:
-        queryset = queryset.filter(category=category)
+    if categories:
+        queryset = queryset.filter(category__in=categories)
     if years:
         queryset = queryset.filter(years__in=years)
 

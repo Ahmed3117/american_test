@@ -5,8 +5,8 @@ from rest_framework.permissions import IsAdminUser
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from course.models import Course, Unit
-from course.serializers import CourseSerializer, UnitSerializer
+from course.models import Course
+from course.serializers import CourseSerializer
 from subscription.models import DiscountCoupon, Plan, PlanSubscription
 from subscription.serializers import (
     DiscountCouponSerializer,
@@ -70,25 +70,10 @@ class ConfirmPlanSubscriptionView(StaffOnlyMixin, APIView):
 
 
 class CourseListCreateView(StaffOnlyMixin, generics.ListCreateAPIView):
-    queryset = Course.objects.prefetch_related("units")
+    queryset = Course.objects.all()
     serializer_class = CourseSerializer
 
 
 class CourseDetailView(StaffOnlyMixin, generics.RetrieveUpdateDestroyAPIView):
-    queryset = Course.objects.prefetch_related("units")
+    queryset = Course.objects.all()
     serializer_class = CourseSerializer
-
-
-class UnitListCreateView(StaffOnlyMixin, generics.ListCreateAPIView):
-    serializer_class = UnitSerializer
-
-    def get_queryset(self):
-        return Unit.objects.filter(course_id=self.kwargs["course_id"])
-
-    def perform_create(self, serializer):
-        serializer.save(course_id=self.kwargs["course_id"])
-
-
-class UnitDetailView(StaffOnlyMixin, generics.RetrieveUpdateDestroyAPIView):
-    queryset = Unit.objects.all()
-    serializer_class = UnitSerializer

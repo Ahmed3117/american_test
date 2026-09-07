@@ -1,7 +1,7 @@
 from rest_framework import serializers
 from django.db import transaction
 
-from course.models import Course, Unit
+from course.models import Course
 from .models import (
     AddReasonChoices,
     Answer,
@@ -30,12 +30,6 @@ class StudentQuestionCategoryOptionSerializer(serializers.ModelSerializer):
         fields = ['id', 'title']
 
 
-class StudentUnitOptionSerializer(serializers.ModelSerializer):
-    class Meta:
-        model = Unit
-        fields = ['id', 'name']
-
-
 class StudentYearOptionSerializer(serializers.ModelSerializer):
     class Meta:
         model = Year
@@ -46,8 +40,10 @@ class ExamSerializer(serializers.ModelSerializer):
     student = serializers.PrimaryKeyRelatedField(read_only=True)
     student_name = serializers.CharField(source='student.name', read_only=True)
     course_name = serializers.CharField(source='course.name', read_only=True)
-    unit_name = serializers.CharField(source='unit.name', read_only=True)
-    category_name = serializers.CharField(source='category.title', read_only=True)
+    categories = serializers.PrimaryKeyRelatedField(
+        queryset=QuestionCategory.objects.all(), many=True, required=False, allow_null=True
+    )
+    category_names = serializers.SerializerMethodField()
     years = serializers.PrimaryKeyRelatedField(
         queryset=Year.objects.all(), many=True, required=False, allow_null=True
     )
@@ -68,10 +64,8 @@ class ExamSerializer(serializers.ModelSerializer):
             'title',
             'course',
             'course_name',
-            'unit',
-            'unit_name',
-            'category',
-            'category_name',
+            'categories',
+            'category_names',
             'years',
             'number_of_questions',
             'easy_questions_count',
@@ -90,9 +84,15 @@ class ExamSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created']
 
     def to_internal_value(self, data):
-        if 'years' in data and data.get('years') is None:
+        if (
+            ('years' in data and data.get('years') is None)
+            or ('categories' in data and data.get('categories') is None)
+        ):
             data = data.copy()
-            data['years'] = []
+            if data.get('years') is None:
+                data['years'] = []
+            if data.get('categories') is None:
+                data['categories'] = []
         return super().to_internal_value(data)
 
     def get_status(self, obj):
@@ -105,9 +105,9 @@ class ExamSerializer(serializers.ModelSerializer):
             raise serializers.ValidationError('A student account is required.')
 
         course = attrs.get('course')
-        unit = attrs.get('unit')
-        category = attrs.get('category')
+        categories = attrs.get('categories') or []
         years = attrs.get('years') or []
+        attrs['categories'] = categories
         attrs['years'] = years
         if not course or not course.is_active:
             raise serializers.ValidationError({'course': 'An active course is required.'})
@@ -122,13 +122,24 @@ class ExamSerializer(serializers.ModelSerializer):
                         f'{max_questions} questions.'
                     )
                 })
-        if unit and (unit.course_id != course.id or not unit.is_active):
+        category_ids = [category.id for category in categories]
+        if len(category_ids) != len(set(category_ids)):
             raise serializers.ValidationError(
-                {'unit': 'The unit must be active and belong to the selected course.'}
+                {'categories': 'The same category cannot be selected more than once.'}
             )
-        if category and category.course_id and category.course_id != course.id:
+        mismatched_categories = [
+            category.id
+            for category in categories
+            if category.course_id and category.course_id != course.id
+        ]
+        if mismatched_categories:
             raise serializers.ValidationError(
-                {'category': 'The category must belong to the selected course.'}
+                {
+                    'categories': (
+                        'Every category must be global or belong to the selected course. '
+                        f'Invalid category IDs: {mismatched_categories}'
+                    )
+                }
             )
 
         difficulty_counts = {
@@ -143,8 +154,7 @@ class ExamSerializer(serializers.ModelSerializer):
 
         selected_ids, missing = select_exam_question_ids(
             course=course,
-            unit=unit,
-            category=category,
+            categories=categories,
             years=years,
             difficulty_counts=difficulty_counts,
         )
@@ -160,14 +170,19 @@ class ExamSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         selected_ids = validated_data.pop('_selected_question_ids')
         student = validated_data.pop('_student')
+        categories = validated_data.pop('categories', [])
         years = validated_data.pop('years', [])
         exam = Exam.objects.create(student=student, **validated_data)
+        exam.categories.set(categories)
         exam.years.set(years)
         ExamQuestion.objects.bulk_create([
             ExamQuestion(exam=exam, question_id=question_id, order=index)
             for index, question_id in enumerate(selected_ids, start=1)
         ])
         return exam
+
+    def get_category_names(self, obj):
+        return [category.title for category in obj.categories.all()]
     
     def get_has_passed_exam(self, obj):
         request = self.context.get("request")
@@ -220,7 +235,7 @@ class QuestionSerializerWithoutCorrectAnswer(serializers.ModelSerializer):
 
     class Meta:
         model = Question
-        fields = ['id', 'text', 'explanation_text', 'explanation_video_url', 'explanation_recorded_audio', 'images', 'points', 'difficulty', 'category', 'course', 'unit', 'is_active', 'answers', 'question_type', 'years']
+        fields = ['id', 'text', 'explanation_text', 'explanation_video_url', 'explanation_recorded_audio', 'images', 'points', 'difficulty', 'category', 'course', 'is_active', 'answers', 'question_type', 'years']
 
     def get_years(self, obj):
         return [{"id": y.id, "value": y.value} for y in obj.years.all()]
@@ -242,7 +257,7 @@ class QuestionSerializerWithCorrectAnswer(serializers.ModelSerializer):
 
     class Meta:
         model = Question
-        fields = ['id', 'text', 'explanation_text', 'explanation_video_url', 'explanation_recorded_audio', 'images', 'points', 'difficulty', 'category', 'course', 'unit', 'is_active', 'answers', 'question_type', 'years']
+        fields = ['id', 'text', 'explanation_text', 'explanation_video_url', 'explanation_recorded_audio', 'images', 'points', 'difficulty', 'category', 'course', 'is_active', 'answers', 'question_type', 'years']
 
     def get_years(self, obj):
         return [{"id": y.id, "value": y.value} for y in obj.years.all()]
@@ -257,7 +272,6 @@ class StudentExamResultSerializer(serializers.ModelSerializer):
     exam_title = serializers.CharField(source='exam.title')
     # exam_description = serializers.CharField(source='exam.description')  # Commented out
     # exam_related_to = serializers.CharField(source='exam.related_to')  # Commented out
-    # exam_unit = serializers.IntegerField(source='exam.unit.id', allow_null=True)  # Commented out
     # exam_course = serializers.SerializerMethodField()  # Commented out
     # number_of_allowed_trials = serializers.IntegerField(source='exam.number_of_allowed_trials')  # Commented out
     # trials = serializers.IntegerField(source='trial')  # Commented out
@@ -295,7 +309,6 @@ class StudentExamResultSerializer(serializers.ModelSerializer):
             'exam_title', 
             # 'exam_description',  # Commented out
             # 'exam_related_to',  # Commented out
-            # 'exam_unit',  # Commented out
             # 'exam_course',  # Commented out
             'exam_score', 
             'student_score',
@@ -444,11 +457,10 @@ class StudentExamResultSerializer(serializers.ModelSerializer):
 class StudentBankSerializer(serializers.ModelSerializer):
     question = QuestionSerializerWithCorrectAnswer(read_only=True)
     course = serializers.CharField(source='question.course.id', read_only=True, allow_null=True)
-    unit = serializers.CharField(source='question.unit.id', read_only=True, allow_null=True)
 
     class Meta:
         model = StudentBank
-        fields = ['id', 'question', 'add_reason', 'is_solved_now', 'created', 'course', 'unit']
+        fields = ['id', 'question', 'add_reason', 'is_solved_now', 'created', 'course']
 
 
 class TempExamCreateSerializer(serializers.Serializer):
@@ -457,14 +469,11 @@ class TempExamCreateSerializer(serializers.Serializer):
     course = serializers.PrimaryKeyRelatedField(
         queryset=Course.objects.filter(is_active=True), required=False, allow_null=True
     )
-    unit = serializers.PrimaryKeyRelatedField(
-        queryset=Unit.objects.filter(is_active=True), required=False, allow_null=True
-    )
-    category = serializers.PrimaryKeyRelatedField(
-        queryset=QuestionCategory.objects.all(), required=False, allow_null=True
+    categories = serializers.PrimaryKeyRelatedField(
+        queryset=QuestionCategory.objects.all(), many=True, required=False, allow_null=True
     )
     years = serializers.PrimaryKeyRelatedField(
-        queryset=Year.objects.all(), many=True, required=False
+        queryset=Year.objects.all(), many=True, required=False, allow_null=True
     )
     selected_questions_type = serializers.ChoiceField(
         choices=['solved', 'not_solved'],
@@ -479,27 +488,42 @@ class TempExamCreateSerializer(serializers.Serializer):
 
     def validate(self, attrs):
         course = attrs.get('course')
-        unit = attrs.get('unit')
-        category = attrs.get('category')
-        if unit:
-            if course and unit.course_id != course.id:
-                raise serializers.ValidationError(
-                    {'unit': 'The unit must belong to the selected course.'}
-                )
-            if not course:
-                attrs['course'] = unit.course
-                course = unit.course
-        if category and category.course_id and course and category.course_id != course.id:
+        categories = attrs.get('categories') or []
+        category_ids = [category.id for category in categories]
+        if len(category_ids) != len(set(category_ids)):
             raise serializers.ValidationError(
-                {'category': 'The category must belong to the selected course.'}
+                {'categories': 'The same category cannot be selected more than once.'}
             )
+        mismatched_categories = [
+            category.id
+            for category in categories
+            if course and category.course_id and category.course_id != course.id
+        ]
+        if mismatched_categories:
+            raise serializers.ValidationError({
+                'categories': (
+                    'Every category must be global or belong to the selected course. '
+                    f'Invalid category IDs: {mismatched_categories}'
+                )
+            })
         return attrs
+
+    def to_internal_value(self, data):
+        if (
+            ('categories' in data and data.get('categories') is None)
+            or ('years' in data and data.get('years') is None)
+        ):
+            data = data.copy()
+            if data.get('categories') is None:
+                data['categories'] = []
+            if data.get('years') is None:
+                data['years'] = []
+        return super().to_internal_value(data)
 
 
 class TempExamListSerializer(serializers.ModelSerializer):
     course_name = serializers.CharField(source='course.name', read_only=True, default=None)
-    unit_name = serializers.CharField(source='unit.name', read_only=True, default=None)
-    category_name = serializers.CharField(source='category.title', read_only=True, default=None)
+    category_names = serializers.SerializerMethodField()
     years = StudentYearOptionSerializer(many=True, read_only=True)
     is_submitted = serializers.SerializerMethodField()
 
@@ -509,10 +533,8 @@ class TempExamListSerializer(serializers.ModelSerializer):
             'id',
             'course',
             'course_name',
-            'unit',
-            'unit_name',
-            'category',
-            'category_name',
+            'categories',
+            'category_names',
             'years',
             'add_reason',
             'selected_questions_type',
@@ -525,6 +547,9 @@ class TempExamListSerializer(serializers.ModelSerializer):
 
     def get_is_submitted(self, obj):
         return obj.result is not None
+
+    def get_category_names(self, obj):
+        return [category.title for category in obj.categories.all()]
 
 
 class TempExamDetailSerializer(TempExamListSerializer):

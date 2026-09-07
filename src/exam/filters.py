@@ -12,7 +12,6 @@ class StudentBankFilter(filters.FilterSet):
     """Student-facing aliases for filtering mistake-bank question metadata."""
 
     course = filters.NumberFilter(field_name='question__course_id')
-    unit = filters.NumberFilter(field_name='question__unit_id')
     category = filters.NumberFilter(field_name='question__category_id')
     year = filters.NumberFilter(field_name='question__years__id')
     years = NumberInFilter(field_name='question__years__id', lookup_expr='in')
@@ -24,7 +23,6 @@ class StudentBankFilter(filters.FilterSet):
             'add_reason',
             'is_solved_now',
             'course',
-            'unit',
             'category',
             'year',
             'years',

@@ -60,9 +60,6 @@ class QuestionSerializer(serializers.ModelSerializer):
     course_name = serializers.CharField(
         source="course.name", read_only=True, default=None
     )
-    unit_name = serializers.CharField(
-        source="unit.name", read_only=True, default=None
-    )
     category_name = serializers.CharField(
         source="category.title", read_only=True, default=None
     )
@@ -89,8 +86,6 @@ class QuestionSerializer(serializers.ModelSerializer):
             "category_name",
             "course",
             "course_name",
-            "unit",
-            "unit_name",
             "is_active",
             "answers",
             "question_type",
@@ -103,9 +98,6 @@ class QuestionSerializer(serializers.ModelSerializer):
     def validate(self, attrs):
         if self.instance is None and "is_active" not in getattr(self, "initial_data", {}):
             attrs["is_active"] = True
-        unit = attrs.get("unit", getattr(self.instance, "unit", None))
-        if unit:
-            attrs["course"] = unit.course
         return attrs
 
     def create(self, validated_data):
@@ -175,8 +167,7 @@ class ExamSerializer(serializers.ModelSerializer):
     student_name = serializers.CharField(source='student.name', read_only=True)
     student_phone = serializers.CharField(source='student.user.username', read_only=True)
     course_name = serializers.CharField(source='course.name', read_only=True)
-    unit_name = serializers.CharField(source='unit.name', read_only=True)
-    category_name = serializers.CharField(source='category.title', read_only=True)
+    category_names = serializers.SerializerMethodField()
     score = serializers.IntegerField(read_only=True)
     passing_percent = serializers.IntegerField(read_only=True)
     result_count = serializers.IntegerField(read_only=True)
@@ -192,10 +183,8 @@ class ExamSerializer(serializers.ModelSerializer):
             "title",
             "course",
             "course_name",
-            "unit",
-            "unit_name",
-            "category",
-            "category_name",
+            "categories",
+            "category_names",
             "years",
             "number_of_questions",
             "easy_questions_count",
@@ -213,6 +202,9 @@ class ExamSerializer(serializers.ModelSerializer):
 
     def get_status(self, obj):
         return obj.status()
+
+    def get_category_names(self, obj):
+        return [category.title for category in obj.categories.all()]
 
 
 class ExamConfigSerializer(serializers.ModelSerializer):
@@ -539,7 +531,6 @@ class FlattenedExamResultSerializer(serializers.ModelSerializer):
     exam_description = serializers.SerializerMethodField()
     exam_number_of_allowed_trials = serializers.SerializerMethodField()
     course_title = serializers.SerializerMethodField()
-    unit_title = serializers.SerializerMethodField()
     passing_percent = serializers.FloatField()
     exam_time_limit = serializers.IntegerField(source="time_limit")
     examscore = serializers.SerializerMethodField()
@@ -558,7 +549,6 @@ class FlattenedExamResultSerializer(serializers.ModelSerializer):
             "exam_title",
             "exam_description",
             "course_title",
-            "unit_title",
             "passing_percent",
             "exam_time_limit",
             "examscore",
@@ -580,9 +570,6 @@ class FlattenedExamResultSerializer(serializers.ModelSerializer):
         if not hasattr(self, '_main_exam_daily_limit'):
             self._main_exam_daily_limit = ExamConfig.load().max_trials_per_day
         return self._main_exam_daily_limit
-
-    def get_unit_title(self, obj):
-        return obj.unit.name if obj.unit else None
 
     def _result(self, obj):
         student_id = self.context.get("student_id")
@@ -617,92 +604,6 @@ class FlattenedExamResultSerializer(serializers.ModelSerializer):
     def get_trials(self, obj):
         result = self._result(obj)
         return ResultTrialSerializer(result.trials.all(), many=True).data if result else []
-
-
-class FlattenedStudentResultSerializer(serializers.ModelSerializer):
-    id = serializers.IntegerField()
-    student_user__username = serializers.CharField(source="user.username")
-    student_name = serializers.CharField(source="name")
-    student_parent_phone = serializers.CharField(source="parent_phone", allow_null=True)
-    student_code = serializers.CharField(source="code", allow_null=True)
-    student_gender = serializers.CharField(source="user.gender")
-    exam_id = serializers.SerializerMethodField()
-    exam_title = serializers.SerializerMethodField()
-    examscore = serializers.SerializerMethodField()
-    student_score = serializers.SerializerMethodField()
-    trial = serializers.SerializerMethodField()
-    is_trials_finished = serializers.SerializerMethodField()
-    issucceeded = serializers.SerializerMethodField()
-    trials = serializers.SerializerMethodField()
-
-    class Meta:
-        model = Student
-        fields = [
-            "id",
-            "student_user__username",
-            "student_name",
-            "student_parent_phone",
-            "student_code",
-            "student_gender",
-            "exam_id",
-            "exam_title",
-            "examscore",
-            "student_score",
-            "trial",
-            "is_trials_finished",
-            "issucceeded",
-            "trials",
-        ]
-
-    def _result(self, obj):
-        exam_id = self.context.get("exam_id")
-        if not exam_id:
-            return None
-        return Result.objects.filter(student=obj, exam_id=exam_id).prefetch_related("trials").first()
-
-    def get_exam_id(self, obj):
-        result = self._result(obj)
-        return result.exam_id if result else None
-
-    def get_exam_title(self, obj):
-        result = self._result(obj)
-        return result.exam.title if result else None
-
-    def get_examscore(self, obj):
-        result = self._result(obj)
-        return result.active_trial.exam_score if result and result.active_trial else 0
-
-    def get_student_score(self, obj):
-        result = self._result(obj)
-        return result.active_trial.score if result and result.active_trial else 0
-
-    def get_trial(self, obj):
-        result = self._result(obj)
-        return result.trial if result else None
-
-    def get_is_trials_finished(self, obj):
-        result = self._result(obj)
-        return result.is_trials_finished if result else False
-
-    def get_issucceeded(self, obj):
-        result = self._result(obj)
-        return result.is_succeeded if result else False
-
-    def get_trials(self, obj):
-        result = self._result(obj)
-        return ResultTrialSerializer(result.trials.all(), many=True).data if result else []
-
-
-class StudentDidNotTakeExamSerializer(serializers.ModelSerializer):
-    student_user__username = serializers.CharField(source="user.username")
-    student_name = serializers.CharField(source="name")
-    student_parent_phone = serializers.CharField(source="parent_phone", allow_null=True)
-    student_gender = serializers.CharField(source="user.gender")
-    course_subscribed_at = serializers.DateTimeField(read_only=True, allow_null=True)
-
-    class Meta:
-        model = Student
-        fields = ["id", "student_user__username", "student_name", "student_parent_phone", "student_gender", "code", "course_subscribed_at"]
 
 
 class CombinedStudentResultSerializer(serializers.ModelSerializer):

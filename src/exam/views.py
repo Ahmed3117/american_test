@@ -24,14 +24,13 @@ from .serializers import (
     StudentBankSerializer,
     StudentExamResultSerializer,
     StudentQuestionCategoryOptionSerializer,
-    StudentUnitOptionSerializer,
     StudentYearOptionSerializer,
     TempExamCreateSerializer,
     TempExamDetailSerializer,
     TempExamListSerializer,
 )
 from .models import AddReasonChoices, Answer, Exam, ExamQuestion, Question, QuestionCategory, QuestionType, Result, ResultTrial, StudentBank, Submission, TempExam, Year
-from course.models import Course, Unit
+from course.models import Course
 from student.models import Student
 from .serializer_fields import stored_file_url
 from .services import (
@@ -58,17 +57,6 @@ class StudentQuestionCategoryOptionListView(generics.ListAPIView):
     queryset = QuestionCategory.objects.only(
         'id', 'title', 'course_id'
     ).order_by('title', 'id')
-
-
-class StudentUnitOptionListView(generics.ListAPIView):
-    serializer_class = StudentUnitOptionSerializer
-    permission_classes = [IsAuthenticated, HasStudentProfile]
-    filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['course']
-    pagination_class = None
-    queryset = Unit.objects.filter(is_active=True).only(
-        'id', 'name', 'course_id', 'order'
-    ).order_by('order', 'name', 'id')
 
 
 class StudentYearOptionListView(generics.ListAPIView):
@@ -115,16 +103,16 @@ class StudentExamListCreateView(generics.ListCreateAPIView):
     serializer_class = ExamSerializer
     permission_classes = [IsAuthenticated, HasStudentProfile]
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ["course", "unit", "category", "years"]
-    search_fields = ["title", "course__name", "unit__name", "category__title", "years__value"]
+    filterset_fields = ["course", "categories", "years"]
+    search_fields = ["title", "course__name", "categories__title", "years__value"]
     ordering_fields = ["created", "title", "number_of_questions", "time_limit"]
     ordering = ["-created", "-id"]
 
     def get_queryset(self):
         return (
             Exam.objects.filter(student=self.request.user.student)
-            .select_related("student", "course", "unit", "category")
-            .prefetch_related("years", "exam_questions")
+            .select_related("student", "course")
+            .prefetch_related("categories", "years", "exam_questions")
             .distinct()
         )
 
@@ -135,8 +123,8 @@ class StudentExamDetailView(generics.RetrieveAPIView):
 
     def get_queryset(self):
         return Exam.objects.filter(student=self.request.user.student).select_related(
-            'student', 'course', 'unit', 'category'
-        ).prefetch_related('years', 'exam_questions')
+            'student', 'course'
+        ).prefetch_related('categories', 'years', 'exam_questions')
 
 
 class ExamConfigStatusView(APIView):
@@ -501,7 +489,7 @@ class StudentExamResultsView(generics.ListAPIView):
     permission_classes = [IsAuthenticated, HasStudentProfile]
     serializer_class = StudentExamResultSerializer
     filter_backends = [DjangoFilterBackend, RelatedCourseFilterBackend]
-    filterset_fields = ['exam__course', 'exam__unit', 'exam__category']
+    filterset_fields = ['exam__course', 'exam__categories']
 
     def get_queryset(self):
         student = self.request.user.student
@@ -511,7 +499,6 @@ class StudentExamResultsView(generics.ListAPIView):
         ).select_related(
             'exam', 
             'exam__course',
-            'exam__unit',
             'student',
             'student__user',
         ).prefetch_related(
@@ -784,7 +771,6 @@ class StudentBankListView(generics.ListAPIView):
         queryset = StudentBank.objects.filter(student=student).select_related(
             'question',
             'question__course',
-            'question__unit', 
             'question__category'
         ).prefetch_related(
             'question__answers',
@@ -840,7 +826,6 @@ class CreateTempExam(APIView):
                 .select_related(
                     'question',
                     'question__course',
-                    'question__unit',
                     'question__category',
                 )
                 .prefetch_related(
@@ -864,8 +849,7 @@ class CreateTempExam(APIView):
         data = serializer.validated_data
         number_of_questions = data['number_of_questions']
         course = data.get('course')
-        unit = data.get('unit')
-        category = data.get('category')
+        categories = data.get('categories', [])
         years = data.get('years', [])
         add_reason = data.get('add_reason')
         selected_questions_type = data.get('selected_questions_type')
@@ -897,10 +881,8 @@ class CreateTempExam(APIView):
             queryset = queryset.filter(add_reason=add_reason)
         if course:
             queryset = queryset.filter(question__course=course)
-        if unit:
-            queryset = queryset.filter(question__unit=unit)
-        if category:
-            queryset = queryset.filter(question__category=category)
+        if categories:
+            queryset = queryset.filter(question__category__in=categories).distinct()
         if years:
             queryset = queryset.filter(question__years__in=years).distinct()
 
@@ -930,13 +912,12 @@ class CreateTempExam(APIView):
         temp_exam = TempExam.objects.create(
             student=student,
             course=course,
-            unit=unit,
-            category=category,
             number_of_questions=number_of_questions,
             time_limit=data['time_limit'],
             selected_questions_type=selected_questions_type,
             add_reason=add_reason,
         )
+        temp_exam.categories.set(categories)
         temp_exam.years.set(years)
         temp_exam.student_bank_items.set(selected_student_banks)
 
@@ -954,8 +935,7 @@ class CreateTempExam(APIView):
             "number_of_questions": temp_exam.number_of_questions,
             "time_limit": temp_exam.time_limit,
             "course": temp_exam.course.id if temp_exam.course else None,
-            "unit": temp_exam.unit.id if temp_exam.unit else None,
-            "category": temp_exam.category.id if temp_exam.category else None,
+            "categories": [category.id for category in categories],
             "years": [year.id for year in years],
             "add_reason": temp_exam.add_reason,
             "selected_questions_type": temp_exam.selected_questions_type,
@@ -968,7 +948,6 @@ def _student_temp_exam_queryset(student):
     bank_items = StudentBank.objects.select_related(
         'question',
         'question__course',
-        'question__unit',
         'question__category',
     ).prefetch_related(
         'question__answers',
@@ -976,8 +955,9 @@ def _student_temp_exam_queryset(student):
         'question__years',
     ).order_by('id')
     return TempExam.objects.filter(student=student).select_related(
-        'course', 'unit', 'category'
+        'course'
     ).prefetch_related(
+        'categories',
         'years',
         Prefetch('student_bank_items', queryset=bank_items),
     ).order_by('-created', '-id')
@@ -989,16 +969,14 @@ class StudentTempExamListView(generics.ListAPIView):
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_fields = [
         'course',
-        'unit',
-        'category',
+        'categories',
         'years',
         'add_reason',
         'selected_questions_type',
     ]
     search_fields = [
         'course__name',
-        'unit__name',
-        'category__title',
+        'categories__title',
         'years__value',
         'student_bank_items__question__text',
     ]

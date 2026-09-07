@@ -15,7 +15,7 @@ class CourseListView(generics.ListAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return Course.objects.filter(is_active=True).prefetch_related("units")
+        return Course.objects.filter(is_active=True)
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
@@ -28,7 +28,7 @@ class CourseDetailView(generics.RetrieveAPIView):
     permission_classes = [IsAuthenticated]
 
     def get_queryset(self):
-        return Course.objects.filter(is_active=True).prefetch_related("units")
+        return Course.objects.filter(is_active=True)
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
@@ -39,7 +39,7 @@ class CourseDetailView(generics.RetrieveAPIView):
 class MyAccessibleCoursesView(CourseListView):
     def get_queryset(self):
         course_ids = get_accessible_course_ids_for_student(getattr(self.request.user, "student", None))
-        return Course.objects.filter(id__in=course_ids, is_active=True).prefetch_related("units")
+        return Course.objects.filter(id__in=course_ids, is_active=True)
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
@@ -59,6 +59,6 @@ class CourseExamListView(generics.ListAPIView):
         return Exam.objects.filter(
             course=course,
             student=student,
-        ).select_related('student', 'course', 'unit', 'category').prefetch_related(
-            'years', 'exam_questions'
+        ).select_related('student', 'course').prefetch_related(
+            'categories', 'years', 'exam_questions'
         ).order_by('-created', '-id')

@@ -1,7 +1,7 @@
 from django.db import models
 from django.utils.translation import gettext_lazy as _
 from django.core.exceptions import ValidationError
-from course.models import Course, Unit
+from course.models import Course
 from student.models import Student
 
 
@@ -40,15 +40,8 @@ class Exam(models.Model):
     course = models.ForeignKey(
         Course, on_delete=models.CASCADE, related_name='exams', null=True, blank=True
     )
-    unit = models.ForeignKey(
-        Unit, on_delete=models.CASCADE, related_name='exams', null=True, blank=True
-    )
-    category = models.ForeignKey(
-        'QuestionCategory',
-        on_delete=models.SET_NULL,
-        related_name='exams',
-        null=True,
-        blank=True,
+    categories = models.ManyToManyField(
+        'QuestionCategory', related_name='exams', blank=True
     )
     years = models.ManyToManyField('Year', related_name='exams', blank=True)
     number_of_questions = models.PositiveIntegerField(default=1)
@@ -71,14 +64,11 @@ class Exam(models.Model):
             raise ValidationError(
                 _("The easy, medium, and hard counts must equal the number of questions.")
             )
-        if self.unit_id and self.course_id and self.unit.course_id != self.course_id:
-            raise ValidationError(_("The selected unit must belong to the selected course."))
-
     def status(self):
         return 'active'
 
     def get_related_name(self) -> str:
-        return self.unit.name if self.unit else (self.course.name if self.course else "")
+        return self.course.name if self.course else ""
 
     def get_related_course(self):
         return self.course_id
@@ -225,9 +215,6 @@ class Question(models.Model):
     course = models.ForeignKey(
         Course, on_delete=models.CASCADE, null=True, blank=True, db_index=True, related_name='coursequestions'
     )
-    unit = models.ForeignKey(
-        Unit, on_delete=models.CASCADE, null=True, blank=True, db_index=True, related_name='unitquestions'
-    )
     is_active = models.BooleanField(default=True)
     created = models.DateTimeField(auto_now_add=True)
     question_type = models.CharField(max_length=5, choices=QuestionType.choices, default=QuestionType.MCQ)
@@ -256,20 +243,14 @@ class Question(models.Model):
             models.Index(fields=['is_active', 'question_type']),
             # Efficient primary-key and active/type filtering
             models.Index(fields=['id', 'is_active', 'question_type']),
-            # For course/unit/category based filtering with active/type checks
+            # For course/category based filtering with active/type checks
             models.Index(fields=['course', 'is_active', 'question_type']),
             models.Index(
                 fields=['course', 'is_active', 'question_type', 'difficulty'],
                 name='exam_quest_course_diff_idx',
             ),
-            models.Index(fields=['unit', 'is_active', 'question_type']),
             models.Index(fields=['category', 'is_active', 'question_type']),
         ]
-
-    def save(self, *args, **kwargs):
-        if self.unit:
-            self.course = self.unit.course
-        super().save(*args, **kwargs)
 
     def __str__(self):
         return str(self.id) + " | " + str(self.question_type) + " | " + self.text
@@ -522,11 +503,8 @@ class StudentBank(models.Model):
 class TempExam(models.Model):
     student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='temp_exams')
     course = models.ForeignKey(Course, on_delete=models.SET_NULL, null=True, blank=True)
-    unit = models.ForeignKey(Unit, on_delete=models.SET_NULL, null=True, blank=True)
-    category = models.ForeignKey(
+    categories = models.ManyToManyField(
         QuestionCategory,
-        on_delete=models.SET_NULL,
-        null=True,
         blank=True,
         related_name='temp_exams',
     )
@@ -557,9 +535,8 @@ class TempExam(models.Model):
         indexes = [
             # For student-based temp exam queries
             models.Index(fields=['student', 'created']),
-            # For filtering by course/unit
-            models.Index(fields=['course', 'unit']),
-            models.Index(fields=['category', 'add_reason']),
+            # For filtering by course and mistake reason
+            models.Index(fields=['course', 'add_reason']),
             # For date-based queries and limits
             models.Index(fields=['created', 'student']),
         ]

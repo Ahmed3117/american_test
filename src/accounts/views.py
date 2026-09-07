@@ -494,6 +494,15 @@ def signin_dashboard(request):
     if not user:
         return Response({'error': 'بيانات الدخول غير صحيحة، من فضلك تحقق.'}, status=status.HTTP_400_BAD_REQUEST)
 
+    if user.is_banned:
+        return Response(
+            {
+                'error': 'لقد تم حظر هذا الحساب',
+                'error_code': 'user_banned',
+            },
+            status=status.HTTP_403_FORBIDDEN,
+        )
+
     # Only allow staff or superuser to use this endpoint
     if not (user.is_staff or user.is_superuser):
         return Response({'error': 'غير مصرح بالدخول عبر هذا المسار.'}, status=status.HTTP_400_BAD_REQUEST)

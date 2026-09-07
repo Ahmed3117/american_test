@@ -55,9 +55,9 @@ class AddAllQuestionsToExamForm(forms.Form):
 
 
 class QuestionAdmin(admin.ModelAdmin):
-    list_display = ('id','text', 'points', 'difficulty', 'category', 'course', 'unit', 'is_active', 'images_count', 'created')
+    list_display = ('id','text', 'points', 'difficulty', 'category', 'course', 'is_active', 'images_count', 'created')
     list_editable = ('is_active',)
-    list_filter = ('difficulty', 'is_active', 'question_type', 'course', 'unit', 'category', 'years')
+    list_filter = ('difficulty', 'is_active', 'question_type', 'course', 'category', 'years')
     filter_horizontal = ('years',)
     search_fields = ('text', 'answers__text')
     inlines = (QuestionImageInline,)
@@ -353,7 +353,7 @@ admin.site.register(Answer)
 @admin.register(QuestionImage)
 class QuestionImageAdmin(admin.ModelAdmin):
     list_display = ('id', 'question', 'image', 'order', 'created')
-    list_filter = ('question__course', 'question__unit')
+    list_filter = ('question__course', 'question__category')
     search_fields = ('question__text', 'image')
     ordering = ('question', 'order', 'id')
     change_list_template = 'admin/exam/questionimage/change_list.html'
@@ -521,16 +521,14 @@ class ExamAdmin(admin.ModelAdmin):
         'title',
         'student',
         'course',
-        'unit',
-        'category',
         'number_of_questions',
         'time_limit',
         'created',
     )
-    list_filter = ('course', 'unit', 'category', 'years')
-    search_fields = ('title', 'student__name', 'student__user__username', 'course__name', 'unit__name')
-    filter_horizontal = ('years',)
-    readonly_fields = [field.name for field in Exam._meta.fields] + ['years']
+    list_filter = ('course', 'categories', 'years')
+    search_fields = ('title', 'student__name', 'student__user__username', 'course__name', 'categories__title')
+    filter_horizontal = ('categories', 'years')
+    readonly_fields = [field.name for field in Exam._meta.fields] + ['categories', 'years']
     actions = ('detach_questions_from_selected_legacy_exams',)
 
     def has_detach_questions_permission(self, request):
@@ -831,8 +829,7 @@ class TempExamAdmin(admin.ModelAdmin):
     # Fields for filtering
     list_filter = (
         'course',
-        'unit',
-        'category',
+        'categories',
         'years',
         'selected_questions_type',
         'add_reason',
@@ -847,8 +844,8 @@ class TempExamAdmin(admin.ModelAdmin):
     readonly_fields = ('created', 'result')
 
     # Use raw_id_fields for better performance with foreign keys
-    raw_id_fields = ('student', 'course', 'unit', 'category')
-    filter_horizontal = ('years', 'student_bank_items')
+    raw_id_fields = ('student', 'course')
+    filter_horizontal = ('categories', 'years', 'student_bank_items')
 
     # Number of items per page
     list_per_page = 20
@@ -860,7 +857,7 @@ class TempExamAdmin(admin.ModelAdmin):
         }),
         ('Content Source (Optional)', {
             'classes': ('collapse',), # Make this section collapsible
-            'fields': ('course', 'unit', 'category', 'years', 'add_reason'),
+            'fields': ('course', 'categories', 'years', 'add_reason'),
         }),
         ('Exam Outcome', {
             'fields': ('result', 'created')

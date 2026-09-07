@@ -5,7 +5,6 @@ from django.db.models import (
     BooleanField,
     Case,
     Count,
-    DateTimeField,
     Exists,
     FloatField,
     IntegerField,
@@ -56,12 +55,10 @@ from dashboard.serializers.exam.exam import (
     ExamSerializer,
     ExamConfigSerializer,
     FlattenedExamResultSerializer,
-    FlattenedStudentResultSerializer,
     QuestionCategorySerializer,
     QuestionSerializer,
     ResultSerializer,
     ResultTrialSerializer,
-    StudentDidNotTakeExamSerializer,
     StudentUnsubscribedExamLimitSerializer,
     TopStudentResultSerializer,
     UnsubscribedExamConfigSerializer,
@@ -90,8 +87,7 @@ class ResultFilter(filters.FilterSet):
             "student": ["exact"],
             "exam": ["exact"],
             "exam__course": ["exact"],
-            "exam__unit": ["exact"],
-            "exam__category": ["exact"],
+            "exam__categories": ["exact"],
             "exam__years": ["exact"],
         }
 
@@ -106,8 +102,7 @@ class ResultTrialFilter(filters.FilterSet):
             "result__student": ["exact"],
             "result__exam": ["exact"],
             "result__exam__course": ["exact"],
-            "result__exam__unit": ["exact"],
-            "result__exam__category": ["exact"],
+            "result__exam__categories": ["exact"],
             "result__exam__years": ["exact"],
             "submit_type": ["exact"],
             "trial": ["exact"],
@@ -140,7 +135,6 @@ class QuestionFilter(filters.FilterSet):
         model = Question
         fields = [
             "course",
-            "unit",
             "is_active",
             "difficulty",
             "category",
@@ -170,7 +164,7 @@ def _nullable_form_value(value):
 
 def _normalize_question_classification(data):
     """Normalize optional classification fields on JSON or multipart input."""
-    for field in ("course", "unit", "category"):
+    for field in ("course", "category"):
         if field in data:
             data[field] = _nullable_form_value(data.get(field))
     if "years" in data and _nullable_form_value(data.get("years")) is None:
@@ -460,9 +454,9 @@ class ExamListCreateView(generics.ListAPIView):
     serializer_class = ExamSerializer
     permission_classes = STAFF_PERMISSIONS
     filter_backends = [DjangoFilterBackend, OrderingFilter, SearchFilter]
-    filterset_fields = ["student", "course", "unit", "category", "years", "created"]
+    filterset_fields = ["student", "course", "categories", "years", "created"]
     search_fields = [
-        "title", "course__name", "unit__name", "category__title",
+        "title", "course__name", "categories__title",
         "years__value", "student__name", "student__user__username", "student__code",
     ]
     ordering_fields = ["created", "title", "number_of_questions", "time_limit"]
@@ -470,8 +464,8 @@ class ExamListCreateView(generics.ListAPIView):
 
     def get_queryset(self):
         return Exam.objects.select_related(
-            "student", "student__user", "course", "unit", "category"
-        ).prefetch_related("years").annotate(
+            "student", "student__user", "course"
+        ).prefetch_related("categories", "years").annotate(
             result_count=Count('results', distinct=True),
             trial_count=Count('results__trials', distinct=True),
         ).distinct()
@@ -479,8 +473,8 @@ class ExamListCreateView(generics.ListAPIView):
 
 class ExamDetailView(generics.RetrieveAPIView):
     queryset = Exam.objects.select_related(
-        "student", "student__user", "course", "unit", "category"
-    ).prefetch_related("years").annotate(
+        "student", "student__user", "course"
+    ).prefetch_related("categories", "years").annotate(
         result_count=Count('results', distinct=True),
         trial_count=Count('results__trials', distinct=True),
     )
@@ -612,7 +606,7 @@ class YearRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
 class QuestionListCreateView(generics.ListCreateAPIView):
     queryset = (
         Question.objects
-        .select_related("course", "unit", "category")
+        .select_related("course", "category")
         .prefetch_related("answers", "years", "images")
         .order_by("-created", "-id")
     )
@@ -653,7 +647,7 @@ class QuestionListCreateView(generics.ListCreateAPIView):
 
 
 class QuestionRetrieveUpdateDestroyView(generics.RetrieveUpdateDestroyAPIView):
-    queryset = Question.objects.select_related("course", "unit", "category").prefetch_related("answers", "images")
+    queryset = Question.objects.select_related("course", "category").prefetch_related("answers", "images")
     serializer_class = QuestionSerializer
     permission_classes = STAFF_PERMISSIONS
     parser_classes = (MultiPartParser, FormParser, JSONParser)
@@ -745,9 +739,6 @@ class BulkQuestionCreateView(generics.CreateAPIView):
                 ),
                 "course": _nullable_form_value(
                     request.data.get(f"questions[{index}][course]")
-                ),
-                "unit": _nullable_form_value(
-                    request.data.get(f"questions[{index}][unit]")
                 ),
                 "question_type": request.data.get(f"questions[{index}][question_type]"),
                 "comment": request.data.get(f"questions[{index}][comment]"),
@@ -846,8 +837,6 @@ class QuestionCountView(APIView):
             filters &= Q(is_active=_bool(request.query_params.get("is_active")))
         if request.query_params.get("category"):
             filters &= Q(category_id=request.query_params["category"])
-        if request.query_params.get("unit"):
-            filters &= Q(unit_id=request.query_params["unit"])
         if request.query_params.get("course"):
             filters &= _question_course_filter(request.query_params["course"])
         if request.query_params.get("question_type"):
@@ -875,7 +864,6 @@ class ExamQuestionListCreateView(generics.ListAPIView):
     filterset_fields = {
         "question__category": ["exact"],
         "question__course": ["exact"],
-        "question__unit": ["exact"],
         "question__question_type": ["exact"],
         "question__difficulty": ["exact"],
         "question__is_active": ["exact"],
@@ -911,7 +899,7 @@ class ResultListView(generics.ListAPIView):
             .values('total')[:1]
         )
         queryset = Result.objects.filter(trials__isnull=False).select_related(
-            "student", "student__user", "exam", "exam__course", "exam__unit"
+            "student", "student__user", "exam", "exam__course"
         ).prefetch_related("trials").annotate(
             unsubscribed_trials_used=Coalesce(
                 Subquery(unsubscribed_usage, output_field=IntegerField()),
@@ -1110,52 +1098,6 @@ class ResultTrialsView(generics.ListAPIView):
         return result.trials.all().order_by("trial")
 
 
-class StudentsTookExamAPIView(generics.ListAPIView):
-    serializer_class = FlattenedStudentResultSerializer
-    permission_classes = STAFF_PERMISSIONS
-
-    def get_queryset(self):
-        exam = get_object_or_404(Exam, id=self.kwargs["exam_id"])
-        queryset = Student.objects.filter(
-            result__exam=exam,
-            result__trials__isnull=False,
-        ).select_related("user").distinct()
-        search = self.request.query_params.get("search")
-        if search:
-            queryset = queryset.filter(Q(name__icontains=search) | Q(code__icontains=search) | Q(parent_phone__icontains=search) | Q(user__username__icontains=search))
-        gender = self.request.query_params.get("gender")
-        if gender:
-            queryset = queryset.filter(user__gender__in=[value.strip() for value in gender.split(",") if value.strip()])
-        return queryset
-
-    def get_serializer_context(self):
-        context = super().get_serializer_context()
-        context["exam_id"] = self.kwargs["exam_id"]
-        return context
-
-
-class StudentsDidNotTakeExamAPIView(generics.ListAPIView):
-    serializer_class = StudentDidNotTakeExamSerializer
-    permission_classes = STAFF_PERMISSIONS
-
-    def get_queryset(self):
-        exam = get_object_or_404(Exam, id=self.kwargs["exam_id"])
-        taken_trial = ResultTrial.objects.filter(
-            result__exam=exam,
-            result__student_id=OuterRef("pk"),
-        )
-        queryset = Student.objects.filter(pk=exam.student_id).annotate(
-            has_taken_exam=Exists(taken_trial)
-        ).filter(has_taken_exam=False)
-        search = self.request.query_params.get("search")
-        if search:
-            queryset = queryset.filter(Q(name__icontains=search) | Q(code__icontains=search) | Q(parent_phone__icontains=search) | Q(user__username__icontains=search))
-        gender = self.request.query_params.get("gender")
-        if gender:
-            queryset = queryset.filter(user__gender__in=[value.strip() for value in gender.split(",") if value.strip()])
-        return queryset.annotate(course_subscribed_at=Value(None, output_field=DateTimeField()))
-
-
 class ExamsTakenByStudentAPIView(generics.ListAPIView):
     serializer_class = FlattenedExamResultSerializer
     permission_classes = STAFF_PERMISSIONS
@@ -1163,9 +1105,10 @@ class ExamsTakenByStudentAPIView(generics.ListAPIView):
     def get_queryset(self):
         student = get_object_or_404(Student, id=self.kwargs["student_id"])
         queryset = Exam.objects.filter(
+            student=student,
             results__student=student,
             results__trials__isnull=False,
-        ).select_related("course", "unit").distinct()
+        ).select_related("course").prefetch_related("categories").distinct()
         search = self.request.query_params.get("search")
         if search:
             queryset = queryset.filter(Q(title__icontains=search))
@@ -1190,8 +1133,8 @@ class ExamsNotTakenByStudentAPIView(generics.ListAPIView):
         queryset = Exam.objects.filter(student=student).annotate(
             has_been_taken=Exists(taken_trial)
         ).filter(has_been_taken=False).select_related(
-            "student", "course", "unit", "category"
-        ).distinct()
+            "student", "course"
+        ).prefetch_related("categories").distinct()
         search = self.request.query_params.get("search")
         if search:
             queryset = queryset.filter(Q(title__icontains=search))
