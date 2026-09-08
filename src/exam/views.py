@@ -3,7 +3,7 @@ import random
 from rest_framework import status
 from rest_framework.response import Response
 from rest_framework.views import APIView
-from rest_framework.parsers import MultiPartParser
+from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework import generics
 from django.shortcuts import get_object_or_404
@@ -29,7 +29,22 @@ from .serializers import (
     TempExamDetailSerializer,
     TempExamListSerializer,
 )
-from .models import AddReasonChoices, Answer, Exam, ExamQuestion, Question, QuestionCategory, QuestionType, Result, ResultTrial, StudentBank, Submission, TempExam, Year
+from .models import (
+    AddReasonChoices,
+    Answer,
+    Exam,
+    ExamQuestion,
+    Question,
+    QuestionCategory,
+    QuestionType,
+    Result,
+    ResultTrial,
+    StudentAccessType,
+    StudentBank,
+    Submission,
+    TempExam,
+    Year,
+)
 from course.models import Course
 from student.models import Student
 from .serializer_fields import stored_file_url
@@ -136,13 +151,12 @@ class ExamConfigStatusView(APIView):
         if course_id:
             course = get_object_or_404(Course, pk=course_id, is_active=True)
             payload = main_exam_quota_status(student, course)
-            payload['temp_exam'] = temp_exam_quota_status(student)
+            payload['temp_exam'] = temp_exam_quota_status(student, course=course)
             return Response(payload)
 
         # Keep the original subscribed quota fields at the root for backward
         # compatibility and expose the guest allowance alongside them.
         payload = trial_quota_status(student)
-        payload['access_type'] = 'subscribed'
         payload['unsubscribed'] = unsubscribed_trial_quota_status(student)
         payload['temp_exam'] = temp_exam_quota_status(student)
         return Response(payload)
@@ -177,7 +191,6 @@ class CheckExamStartAbility(APIView):
                     "quota": main_exam_quota_status(
                         student,
                         exam.course,
-                        exam.number_of_questions,
                     ),
                 }, status=status.HTTP_200_OK)
 
@@ -187,7 +200,6 @@ class CheckExamStartAbility(APIView):
         quota = main_exam_quota_status(
             student,
             exam.course,
-            exam.number_of_questions,
         )
         return Response({
             "status": "can_start" if quota['can_start'] else "quota_reached",
@@ -235,7 +247,6 @@ class StartExam(APIView):
             quota = main_exam_quota_status(
                 student,
                 exam.course,
-                exam.number_of_questions,
             )
             if not quota['can_start']:
                 return Response(
@@ -251,7 +262,7 @@ class StartExam(APIView):
                 trial=result.trial,
                 student_started_exam_at=timezone.now(),
                 submitted_by_unsubscribed_user=(
-                    quota['access_type'] == 'unsubscribed'
+                    quota['access_type'] == StudentAccessType.UNSUBSCRIBED
                 ),
             )
             resuming = False
@@ -273,7 +284,7 @@ class StartExam(APIView):
 
 class SubmitExam(APIView):
     permission_classes = [IsAuthenticated, HasStudentProfile]
-    parser_classes = [MultiPartParser]
+    parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     @transaction.atomic
     def post(self, request, exam_id):
@@ -286,13 +297,27 @@ class SubmitExam(APIView):
         if not idempotency_key:
             # Generate a unique key based on request content if not provided
             import hashlib
-            content_hash = hashlib.md5(str(sorted(request.data.items())).encode()).hexdigest()
+            content_hash = hashlib.md5(str(sorted(str(request.data).encode())).encode()).hexdigest()
             idempotency_key = f"{student.id}_{exam_id}_{content_hash}"
+
+        # Support both JSON list of answers: [{"question_id": 1, "answer_id": 2}]
+        # and traditional form keys: selected_answer_id_<question_id>
+        submitted_question_ids = set()
+        answers_map = {}
+        raw_answers = request.data.get("answers")
+        if isinstance(raw_answers, list):
+            for ans in raw_answers:
+                if isinstance(ans, dict) and "question_id" in ans:
+                    try:
+                        qid = int(ans["question_id"])
+                        answers_map[qid] = ans.get("answer_id")
+                        submitted_question_ids.add(qid)
+                    except (TypeError, ValueError):
+                        pass
 
         # Validate every question reference sent by the frontend. The actual
         # grading loop below uses the complete frozen exam question set so a
         # question omitted from the payload is still recorded as unanswered.
-        submitted_question_ids = set()
         for key in request.data.keys():
             try:
                 if key.startswith('question_id_'):
@@ -368,7 +393,10 @@ class SubmitExam(APIView):
         for question_id, question in exam_questions.items():
             if question.question_type == QuestionType.MCQ:
                 # Process MCQ answer
-                selected_answer_id = request.data.get(f"selected_answer_id_{question_id}")
+                selected_answer_id = answers_map.get(
+                    question_id,
+                    request.data.get(f"selected_answer_id_{question_id}")
+                )
                 # Handle null/empty string case
                 if selected_answer_id in [None, "", "null"]:
                     # Update or create submission with no answer
@@ -854,7 +882,19 @@ class CreateTempExam(APIView):
         add_reason = data.get('add_reason')
         selected_questions_type = data.get('selected_questions_type')
 
-        quota = temp_exam_quota_status(student)
+        quota = temp_exam_quota_status(
+            student,
+            course=course,
+            number_of_questions=number_of_questions,
+        )
+        if 'max_questions_per_exam' in quota['reached_limits']:
+            return Response(
+                {
+                    "error": "number_of_questions exceeds the applicable exam limit.",
+                    "quota": quota,
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         if not quota['can_start']:
             return Response(
                 {"error": "Temp exam quota reached.", "quota": quota},
@@ -912,6 +952,7 @@ class CreateTempExam(APIView):
         temp_exam = TempExam.objects.create(
             student=student,
             course=course,
+            student_type=quota['access_type'],
             number_of_questions=number_of_questions,
             time_limit=data['time_limit'],
             selected_questions_type=selected_questions_type,
@@ -935,12 +976,13 @@ class CreateTempExam(APIView):
             "number_of_questions": temp_exam.number_of_questions,
             "time_limit": temp_exam.time_limit,
             "course": temp_exam.course.id if temp_exam.course else None,
+            "student_type": temp_exam.student_type,
             "categories": [category.id for category in categories],
             "years": [year.id for year in years],
             "add_reason": temp_exam.add_reason,
             "selected_questions_type": temp_exam.selected_questions_type,
             "questions": question_data,
-            "quota": temp_exam_quota_status(student),
+            "quota": temp_exam_quota_status(student, course=course),
         }, status=status.HTTP_201_CREATED)
 
 
@@ -969,6 +1011,7 @@ class StudentTempExamListView(generics.ListAPIView):
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     filterset_fields = [
         'course',
+        'student_type',
         'categories',
         'years',
         'add_reason',

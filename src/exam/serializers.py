@@ -7,6 +7,7 @@ from .models import (
     Answer,
     DifficultyLevel,
     Exam,
+    ExamMode,
     ExamQuestion,
     Question,
     QuestionCategory,
@@ -14,14 +15,12 @@ from .models import (
     Result,
     StudentBank,
     TempExam,
-    UnsubscribedExamConfig,
     Year,
 )
 from student.models import StudentFavorite
 from django.contrib.contenttypes.models import ContentType
 from .serializer_fields import StoredFileField
-from .services import select_exam_question_ids
-from subscription.access import student_has_course_access
+from .services import effective_exam_limits, select_exam_question_ids, student_access_type
 
 
 class StudentQuestionCategoryOptionSerializer(serializers.ModelSerializer):
@@ -111,17 +110,20 @@ class ExamSerializer(serializers.ModelSerializer):
         attrs['years'] = years
         if not course or not course.is_active:
             raise serializers.ValidationError({'course': 'An active course is required.'})
-        has_course_access = student_has_course_access(student, course)
-        if not has_course_access:
-            max_questions = UnsubscribedExamConfig.load().max_questions_per_exam
-            requested_questions = attrs.get('number_of_questions')
-            if requested_questions > max_questions:
-                raise serializers.ValidationError({
-                    'number_of_questions': (
-                        'Unsubscribed exams can contain at most '
-                        f'{max_questions} questions.'
-                    )
-                })
+        access_type = student_access_type(student, course)
+        max_questions = effective_exam_limits(
+            student,
+            ExamMode.MAIN,
+            access_type,
+        )['limits']['max_questions_per_exam']
+        requested_questions = attrs.get('number_of_questions')
+        if requested_questions > max_questions:
+            raise serializers.ValidationError({
+                'number_of_questions': (
+                    f'{access_type} main exams can contain at most '
+                    f'{max_questions} questions.'
+                )
+            })
         category_ids = [category.id for category in categories]
         if len(category_ids) != len(set(category_ids)):
             raise serializers.ValidationError(
@@ -533,6 +535,7 @@ class TempExamListSerializer(serializers.ModelSerializer):
             'id',
             'course',
             'course_name',
+            'student_type',
             'categories',
             'category_names',
             'years',

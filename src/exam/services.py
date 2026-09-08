@@ -9,125 +9,169 @@ from subscription.access import student_has_course_access
 from .models import (
     DifficultyLevel,
     ExamConfig,
+    ExamMode,
     Question,
     QuestionType,
     ResultTrial,
+    StudentAccessType,
+    StudentExamQuotaOverride,
     TempExam,
-    UnsubscribedExamConfig,
 )
 
 
+TRIAL_PERIODS = ('daily', 'weekly', 'monthly')
+
+
+def student_access_type(student, course):
+    """Resolve course-specific access; a missing course is unsubscribed."""
+    if course and student_has_course_access(student, course):
+        return StudentAccessType.SUBSCRIBED
+    return StudentAccessType.UNSUBSCRIBED
+
+
+def effective_exam_limits(student, exam_type, access_type):
+    """Return global question cap plus effective personal calendar limits."""
+    config = ExamConfig.load(access_type)
+    override = StudentExamQuotaOverride.objects.filter(
+        student=student,
+        exam_type=exam_type,
+        student_type=access_type,
+    ).first()
+    custom = {
+        'daily': getattr(override, 'max_trials_per_day', None),
+        'weekly': getattr(override, 'max_trials_per_week', None),
+        'monthly': getattr(override, 'max_trials_per_month', None),
+    }
+    global_limits = {
+        'daily': config.max_trials_per_day,
+        'weekly': config.max_trials_per_week,
+        'monthly': config.max_trials_per_month,
+    }
+    limits = {
+        period: global_limits[period] if custom[period] is None else custom[period]
+        for period in TRIAL_PERIODS
+    }
+    limits['max_questions_per_exam'] = config.max_questions_per_exam
+    return {
+        'limits': limits,
+        'custom_limits': custom,
+        'uses_custom_trial_limits': any(value is not None for value in custom.values()),
+    }
+
+
+def trial_quota_period_starts(at=None):
+    """Return local calendar boundaries used by every exam quota."""
+    at = timezone.localtime(at or timezone.now())
+    day_start = at.replace(hour=0, minute=0, second=0, microsecond=0)
+    return {
+        'daily': day_start,
+        'weekly': day_start - timedelta(days=day_start.weekday()),
+        'monthly': day_start.replace(day=1),
+    }
+
+
+def exam_quota_status(
+    student,
+    *,
+    exam_type,
+    access_type,
+    number_of_questions=None,
+    at=None,
+):
+    """Return quota status for one main/temp and access-type combination."""
+    period_starts = trial_quota_period_starts(at)
+    if exam_type == ExamMode.MAIN:
+        usage_queryset = ResultTrial.objects.filter(
+            result__student=student,
+            result__exam__student=student,
+            submitted_by_unsubscribed_user=(
+                access_type == StudentAccessType.UNSUBSCRIBED
+            ),
+        )
+        date_field = 'student_started_exam_at'
+    elif exam_type == ExamMode.TEMP:
+        usage_queryset = TempExam.objects.filter(
+            student=student,
+            student_type=access_type,
+        )
+        date_field = 'created'
+    else:
+        raise ValueError(f'Unsupported exam type: {exam_type}')
+
+    usage = usage_queryset.aggregate(**{
+        period: Count(
+            'id',
+            filter=Q(**{f'{date_field}__gte': period_starts[period]}),
+        )
+        for period in TRIAL_PERIODS
+    })
+    effective = effective_exam_limits(student, exam_type, access_type)
+    limits = effective['limits']
+    remaining = {
+        period: max(limits[period] - usage[period], 0)
+        for period in TRIAL_PERIODS
+    }
+    reached = [
+        period for period in TRIAL_PERIODS if usage[period] >= limits[period]
+    ]
+    if (
+        number_of_questions is not None
+        and number_of_questions > limits['max_questions_per_exam']
+    ):
+        reached.append('max_questions_per_exam')
+    return {
+        'exam_type': exam_type,
+        'access_type': access_type,
+        'limits': limits,
+        'usage': usage,
+        'remaining': remaining,
+        'reached_limits': reached,
+        'can_start': not reached,
+        'custom_limits': effective['custom_limits'],
+        'uses_custom_trial_limits': effective['uses_custom_trial_limits'],
+    }
+
+
 def trial_quota_status(student, at=None):
-    """Return calendar-period usage for all main-exam trial starts."""
-    at = timezone.localtime(at or timezone.now())
-    day_start = at.replace(hour=0, minute=0, second=0, microsecond=0)
-    week_start = day_start - timedelta(days=day_start.weekday())
-    month_start = day_start.replace(day=1)
-
-    usage = ResultTrial.objects.filter(
-        result__student=student,
-        result__exam__student=student,
-        submitted_by_unsubscribed_user=False,
-    ).aggregate(
-        daily=Count('id', filter=Q(student_started_exam_at__gte=day_start)),
-        weekly=Count('id', filter=Q(student_started_exam_at__gte=week_start)),
-        monthly=Count('id', filter=Q(student_started_exam_at__gte=month_start)),
+    """Compatibility helper for subscribed main-exam quota status."""
+    return exam_quota_status(
+        student,
+        exam_type=ExamMode.MAIN,
+        access_type=StudentAccessType.SUBSCRIBED,
+        at=at,
     )
-    config = ExamConfig.load()
-    limits = {
-        'daily': config.max_trials_per_day,
-        'weekly': config.max_trials_per_week,
-        'monthly': config.max_trials_per_month,
-    }
-    remaining = {
-        period: max(limits[period] - usage[period], 0)
-        for period in limits
-    }
-    reached = [period for period in limits if usage[period] >= limits[period]]
-    return {
-        'limits': limits,
-        'usage': usage,
-        'remaining': remaining,
-        'reached_limits': reached,
-        'can_start': not reached,
-    }
 
 
-def temp_exam_quota_status(student, at=None):
-    """Use ExamConfig's calendar limits for temp-exam creations."""
-    at = timezone.localtime(at or timezone.now())
-    day_start = at.replace(hour=0, minute=0, second=0, microsecond=0)
-    week_start = day_start - timedelta(days=day_start.weekday())
-    month_start = day_start.replace(day=1)
-
-    usage = TempExam.objects.filter(student=student).aggregate(
-        daily=Count('id', filter=Q(created__gte=day_start)),
-        weekly=Count('id', filter=Q(created__gte=week_start)),
-        monthly=Count('id', filter=Q(created__gte=month_start)),
+def unsubscribed_trial_quota_status(student, at=None):
+    """Compatibility helper for unsubscribed main-exam quota status."""
+    return exam_quota_status(
+        student,
+        exam_type=ExamMode.MAIN,
+        access_type=StudentAccessType.UNSUBSCRIBED,
+        at=at,
     )
-    config = ExamConfig.load()
-    limits = {
-        'daily': config.max_trials_per_day,
-        'weekly': config.max_trials_per_week,
-        'monthly': config.max_trials_per_month,
-    }
-    remaining = {
-        period: max(limits[period] - usage[period], 0)
-        for period in limits
-    }
-    reached = [period for period in limits if usage[period] >= limits[period]]
-    return {
-        'limits': limits,
-        'usage': usage,
-        'remaining': remaining,
-        'reached_limits': reached,
-        'can_start': not reached,
-    }
 
 
-def unsubscribed_trial_quota_status(student):
-    """Return lifetime main-exam usage for trials started unsubscribed."""
-    config = UnsubscribedExamConfig.load()
-    custom_limit = student.unsubscribed_exam_max_trials
-    limit = config.max_trials if custom_limit is None else custom_limit
-    usage = ResultTrial.objects.filter(
-        result__student=student,
-        result__exam__student=student,
-        submitted_by_unsubscribed_user=True,
-    ).count()
-    remaining = max(limit - usage, 0)
-    return {
-        'limits': {
-            'total': limit,
-            'max_questions_per_exam': config.max_questions_per_exam,
-        },
-        'usage': {'total': usage},
-        'remaining': {'total': remaining},
-        'reached_limits': ['total'] if usage >= limit else [],
-        'can_start': usage < limit,
-        'uses_custom_trial_limit': custom_limit is not None,
-    }
+def temp_exam_quota_status(student, course=None, number_of_questions=None, at=None):
+    access_type = student_access_type(student, course)
+    return exam_quota_status(
+        student,
+        exam_type=ExamMode.TEMP,
+        access_type=access_type,
+        number_of_questions=number_of_questions,
+        at=at,
+    )
 
 
 def main_exam_quota_status(student, course, number_of_questions=None, at=None):
-    """Choose subscribed calendar quotas or unsubscribed lifetime quotas."""
-    if student_has_course_access(student, course):
-        quota = trial_quota_status(student, at=at)
-        quota['access_type'] = 'subscribed'
-        return quota
-
-    quota = unsubscribed_trial_quota_status(student)
-    quota['access_type'] = 'unsubscribed'
-    if (
-        number_of_questions is not None
-        and number_of_questions > quota['limits']['max_questions_per_exam']
-    ):
-        quota['can_start'] = False
-        quota['reached_limits'] = [
-            *quota['reached_limits'],
-            'max_questions_per_exam',
-        ]
-    return quota
+    access_type = student_access_type(student, course)
+    return exam_quota_status(
+        student,
+        exam_type=ExamMode.MAIN,
+        access_type=access_type,
+        number_of_questions=number_of_questions,
+        at=at,
+    )
 
 
 def select_exam_question_ids(*, course, categories, years, difficulty_counts):

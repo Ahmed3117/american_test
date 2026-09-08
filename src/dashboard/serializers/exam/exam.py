@@ -4,18 +4,23 @@ from exam.models import (
     Answer,
     Exam,
     ExamConfig,
+    ExamMode,
     ExamQuestion,
     Question,
     QuestionCategory,
     QuestionImage,
     Result,
     ResultTrial,
-    UnsubscribedExamConfig,
+    StudentAccessType,
+    StudentExamQuotaOverride,
     Year,
 )
 from student.models import Student
 from exam.serializer_fields import StoredFileField
-from exam.services import unsubscribed_trial_quota_status
+from exam.services import (
+    effective_exam_limits,
+    exam_quota_status,
+)
 
 
 class QuestionImageSerializer(serializers.ModelSerializer):
@@ -208,13 +213,23 @@ class ExamSerializer(serializers.ModelSerializer):
 
 
 class ExamConfigSerializer(serializers.ModelSerializer):
+    student_type = serializers.ChoiceField(
+        choices=StudentAccessType.choices,
+        required=True,
+    )
+    max_questions_per_exam = serializers.IntegerField(min_value=1)
+
     class Meta:
         model = ExamConfig
         fields = [
+            'id',
+            'student_type',
             'max_trials_per_day',
             'max_trials_per_week',
             'max_trials_per_month',
+            'max_questions_per_exam',
         ]
+        read_only_fields = ['id']
 
     def validate(self, attrs):
         instance = self.instance or ExamConfig()
@@ -228,78 +243,162 @@ class ExamConfigSerializer(serializers.ModelSerializer):
         return attrs
 
 
-class UnsubscribedExamConfigSerializer(serializers.ModelSerializer):
-    max_trials = serializers.IntegerField(min_value=0)
-    max_questions_per_exam = serializers.IntegerField(min_value=1)
-
-    class Meta:
-        model = UnsubscribedExamConfig
-        fields = ['max_trials', 'max_questions_per_exam']
-
-
-class StudentUnsubscribedExamLimitSerializer(serializers.ModelSerializer):
+class StudentExamLimitSerializer(serializers.ModelSerializer):
     student_id = serializers.IntegerField(source='id', read_only=True)
     student_name = serializers.CharField(source='name', read_only=True)
     student_phone = serializers.CharField(source='user.username', read_only=True)
-    max_trials = serializers.IntegerField(
-        source='unsubscribed_exam_max_trials',
-        min_value=0,
-        allow_null=True,
-        required=False,
-    )
-    effective_max_trials = serializers.SerializerMethodField()
-    used_trials = serializers.SerializerMethodField()
-    remaining_trials = serializers.SerializerMethodField()
-    can_start = serializers.SerializerMethodField()
+    limits = serializers.SerializerMethodField()
 
     class Meta:
         model = Student
-        fields = [
-            'student_id',
-            'student_name',
-            'student_phone',
-            'max_trials',
-            'effective_max_trials',
-            'used_trials',
-            'remaining_trials',
-            'can_start',
-        ]
+        fields = ['student_id', 'student_name', 'student_phone', 'limits']
 
-    def _quota(self, obj):
-        if not hasattr(self, '_quota_cache'):
-            self._quota_cache = {}
-        if obj.id not in self._quota_cache:
-            annotated_usage = getattr(obj, 'unsubscribed_trials_used', None)
-            if annotated_usage is None:
-                quota = unsubscribed_trial_quota_status(obj)
-            else:
-                if not hasattr(self, '_unsubscribed_exam_config'):
-                    self._unsubscribed_exam_config = UnsubscribedExamConfig.load()
-                limit = (
-                    self._unsubscribed_exam_config.max_trials
-                    if obj.unsubscribed_exam_max_trials is None
-                    else obj.unsubscribed_exam_max_trials
-                )
-                quota = {
-                    'limits': {'total': limit},
-                    'usage': {'total': annotated_usage},
-                    'remaining': {'total': max(limit - annotated_usage, 0)},
-                    'can_start': annotated_usage < limit,
+    def _configs(self):
+        if not hasattr(self, '_config_cache'):
+            self._config_cache = {
+                config.student_type: config for config in ExamConfig.objects.all()
+            }
+            for student_type in StudentAccessType.values:
+                if student_type not in self._config_cache:
+                    self._config_cache[student_type] = ExamConfig.load(student_type)
+        return self._config_cache
+
+    @staticmethod
+    def _overrides(obj):
+        return {
+            (override.exam_type, override.student_type): override
+            for override in obj.exam_quota_overrides.all()
+        }
+
+    def get_limits(self, obj):
+        configs = self._configs()
+        overrides = self._overrides(obj)
+        include_usage = self.context.get('include_usage', False)
+        rows = []
+        for exam_type in ExamMode.values:
+            for student_type in StudentAccessType.values:
+                override = overrides.get((exam_type, student_type))
+                custom = {
+                    'daily': getattr(override, 'max_trials_per_day', None),
+                    'weekly': getattr(override, 'max_trials_per_week', None),
+                    'monthly': getattr(override, 'max_trials_per_month', None),
                 }
-            self._quota_cache[obj.id] = quota
-        return self._quota_cache[obj.id]
+                config = configs[student_type]
+                effective = {
+                    'daily': config.max_trials_per_day if custom['daily'] is None else custom['daily'],
+                    'weekly': config.max_trials_per_week if custom['weekly'] is None else custom['weekly'],
+                    'monthly': config.max_trials_per_month if custom['monthly'] is None else custom['monthly'],
+                    'max_questions_per_exam': config.max_questions_per_exam,
+                }
+                row = {
+                    'exam_type': exam_type,
+                    'student_type': student_type,
+                    'custom_limits': custom,
+                    'effective_limits': effective,
+                    'uses_custom_trial_limits': any(
+                        value is not None for value in custom.values()
+                    ),
+                }
+                if include_usage:
+                    quota = exam_quota_status(
+                        obj,
+                        exam_type=exam_type,
+                        access_type=student_type,
+                    )
+                    row.update({
+                        'usage': quota['usage'],
+                        'remaining': quota['remaining'],
+                        'reached_limits': quota['reached_limits'],
+                        'can_start': quota['can_start'],
+                    })
+                rows.append(row)
+        return rows
 
-    def get_effective_max_trials(self, obj):
-        return self._quota(obj)['limits']['total']
 
-    def get_used_trials(self, obj):
-        return self._quota(obj)['usage']['total']
+class StudentExamQuotaOverrideUpdateSerializer(serializers.Serializer):
+    exam_type = serializers.ChoiceField(choices=ExamMode.choices)
+    student_type = serializers.ChoiceField(choices=StudentAccessType.choices)
+    max_trials_per_day = serializers.IntegerField(
+        min_value=0, allow_null=True, required=False
+    )
+    max_trials_per_week = serializers.IntegerField(
+        min_value=0, allow_null=True, required=False
+    )
+    max_trials_per_month = serializers.IntegerField(
+        min_value=0, allow_null=True, required=False
+    )
 
-    def get_remaining_trials(self, obj):
-        return self._quota(obj)['remaining']['total']
+    def validate(self, attrs):
+        limit_fields = (
+            'max_trials_per_day',
+            'max_trials_per_week',
+            'max_trials_per_month',
+        )
+        if not any(field in attrs for field in limit_fields):
+            raise serializers.ValidationError(
+                'Send at least one daily, weekly, or monthly override.'
+            )
+        student = self.context['student']
+        override = StudentExamQuotaOverride.objects.filter(
+            student=student,
+            exam_type=attrs['exam_type'],
+            student_type=attrs['student_type'],
+        ).first()
+        config = ExamConfig.load(attrs['student_type'])
+        custom = {
+            'daily': attrs.get(
+                'max_trials_per_day', getattr(override, 'max_trials_per_day', None)
+            ),
+            'weekly': attrs.get(
+                'max_trials_per_week', getattr(override, 'max_trials_per_week', None)
+            ),
+            'monthly': attrs.get(
+                'max_trials_per_month', getattr(override, 'max_trials_per_month', None)
+            ),
+        }
+        effective = {
+            'daily': config.max_trials_per_day if custom['daily'] is None else custom['daily'],
+            'weekly': config.max_trials_per_week if custom['weekly'] is None else custom['weekly'],
+            'monthly': config.max_trials_per_month if custom['monthly'] is None else custom['monthly'],
+        }
+        if effective['daily'] > effective['weekly']:
+            raise serializers.ValidationError({
+                'max_trials_per_week': 'The effective weekly limit must be at least the effective daily limit.'
+            })
+        if effective['weekly'] > effective['monthly']:
+            raise serializers.ValidationError({
+                'max_trials_per_month': 'The effective monthly limit must be at least the effective weekly limit.'
+            })
+        return attrs
 
-    def get_can_start(self, obj):
-        return self._quota(obj)['can_start']
+    def save(self, **kwargs):
+        student = self.context['student']
+        exam_type = self.validated_data['exam_type']
+        student_type = self.validated_data['student_type']
+        override, _ = StudentExamQuotaOverride.objects.get_or_create(
+            student=student,
+            exam_type=exam_type,
+            student_type=student_type,
+        )
+        for field in (
+            'max_trials_per_day',
+            'max_trials_per_week',
+            'max_trials_per_month',
+        ):
+            if field in self.validated_data:
+                setattr(override, field, self.validated_data[field])
+        if all(
+            getattr(override, field) is None
+            for field in (
+                'max_trials_per_day',
+                'max_trials_per_week',
+                'max_trials_per_month',
+            )
+        ):
+            override.delete()
+            return None
+        override.save()
+        return override
 
 
 class QuestionCategorySerializer(serializers.ModelSerializer):
@@ -352,9 +451,11 @@ class ResultSerializer(serializers.ModelSerializer):
     submit_type = serializers.SerializerMethodField()
     has_unsubscribed_submission = serializers.BooleanField(read_only=True)
     submitted_by_unsubscribed_user = serializers.SerializerMethodField()
-    unsubscribed_exam_max_trials = serializers.SerializerMethodField()
-    unsubscribed_exam_trials_used = serializers.SerializerMethodField()
-    unsubscribed_exam_trials_remaining = serializers.SerializerMethodField()
+    quota_access_type = serializers.SerializerMethodField()
+    effective_trial_limits = serializers.SerializerMethodField()
+    trial_usage = serializers.SerializerMethodField()
+    trial_remaining = serializers.SerializerMethodField()
+    can_start = serializers.SerializerMethodField()
 
     class Meta:
         model = Result
@@ -379,9 +480,11 @@ class ResultSerializer(serializers.ModelSerializer):
             "submit_type",
             "has_unsubscribed_submission",
             "submitted_by_unsubscribed_user",
-            "unsubscribed_exam_max_trials",
-            "unsubscribed_exam_trials_used",
-            "unsubscribed_exam_trials_remaining",
+            "quota_access_type",
+            "effective_trial_limits",
+            "trial_usage",
+            "trial_remaining",
+            "can_start",
         ]
 
     def _active_trial(self, obj):
@@ -408,45 +511,41 @@ class ResultSerializer(serializers.ModelSerializer):
         return obj.is_allowed_to_show_result if hasattr(obj, "is_allowed_to_show_result") else False
 
     def get_number_of_allowed_trials(self, obj):
+        return self._quota(obj)['limits']['daily']
+
+    def _access_type(self, obj):
         trial = self._active_trial(obj)
         if trial and trial.submitted_by_unsubscribed_user:
-            return self._unsubscribed_quota(obj)['limits']['total']
-        if not hasattr(self, '_main_exam_daily_limit'):
-            self._main_exam_daily_limit = ExamConfig.load().max_trials_per_day
-        return self._main_exam_daily_limit
+            return StudentAccessType.UNSUBSCRIBED
+        return StudentAccessType.SUBSCRIBED
 
-    def _unsubscribed_quota(self, obj):
-        if not hasattr(self, '_unsubscribed_quota_cache'):
-            self._unsubscribed_quota_cache = {}
-        if obj.student_id not in self._unsubscribed_quota_cache:
-            annotated_usage = getattr(obj, 'unsubscribed_trials_used', None)
-            if annotated_usage is None:
-                quota = unsubscribed_trial_quota_status(obj.student)
-            else:
-                if not hasattr(self, '_unsubscribed_exam_config'):
-                    self._unsubscribed_exam_config = UnsubscribedExamConfig.load()
-                custom_limit = obj.student.unsubscribed_exam_max_trials
-                limit = (
-                    self._unsubscribed_exam_config.max_trials
-                    if custom_limit is None
-                    else custom_limit
-                )
-                quota = {
-                    'limits': {'total': limit},
-                    'usage': {'total': annotated_usage},
-                    'remaining': {'total': max(limit - annotated_usage, 0)},
-                }
-            self._unsubscribed_quota_cache[obj.student_id] = quota
-        return self._unsubscribed_quota_cache[obj.student_id]
+    def _quota(self, obj):
+        if not hasattr(self, '_quota_cache'):
+            self._quota_cache = {}
+        access_type = self._access_type(obj)
+        key = (obj.student_id, access_type)
+        if key not in self._quota_cache:
+            self._quota_cache[key] = exam_quota_status(
+                obj.student,
+                exam_type=ExamMode.MAIN,
+                access_type=access_type,
+            )
+        return self._quota_cache[key]
 
-    def get_unsubscribed_exam_max_trials(self, obj):
-        return self._unsubscribed_quota(obj)['limits']['total']
+    def get_quota_access_type(self, obj):
+        return self._access_type(obj)
 
-    def get_unsubscribed_exam_trials_used(self, obj):
-        return self._unsubscribed_quota(obj)['usage']['total']
+    def get_effective_trial_limits(self, obj):
+        return self._quota(obj)['limits']
 
-    def get_unsubscribed_exam_trials_remaining(self, obj):
-        return self._unsubscribed_quota(obj)['remaining']['total']
+    def get_trial_usage(self, obj):
+        return self._quota(obj)['usage']
+
+    def get_trial_remaining(self, obj):
+        return self._quota(obj)['remaining']
+
+    def get_can_start(self, obj):
+        return self._quota(obj)['can_start']
 
     def get_student_name(self, obj):
         return getattr(obj.student, "name", getattr(obj, "student_name", ""))
@@ -567,9 +666,18 @@ class FlattenedExamResultSerializer(serializers.ModelSerializer):
         return None
 
     def get_exam_number_of_allowed_trials(self, obj):
-        if not hasattr(self, '_main_exam_daily_limit'):
-            self._main_exam_daily_limit = ExamConfig.load().max_trials_per_day
-        return self._main_exam_daily_limit
+        result = self._result(obj)
+        trial = result.active_trial if result else None
+        access_type = (
+            StudentAccessType.UNSUBSCRIBED
+            if trial and trial.submitted_by_unsubscribed_user
+            else StudentAccessType.SUBSCRIBED
+        )
+        return effective_exam_limits(
+            obj.student,
+            ExamMode.MAIN,
+            access_type,
+        )['limits']['daily']
 
     def _result(self, obj):
         student_id = self.context.get("student_id")

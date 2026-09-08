@@ -35,18 +35,20 @@ from exam.models import (
     DifficultyLevel,
     Exam,
     ExamConfig,
+    ExamMode,
     Question,
     QuestionCategory,
     QuestionImage,
     QuestionType,
     Result,
     ResultTrial,
+    StudentAccessType,
+    StudentExamQuotaOverride,
     Submission,
-    UnsubscribedExamConfig,
     Year,
 )
 from exam.serializer_fields import stored_file_url
-from exam.services import unsubscribed_trial_quota_status
+from exam.services import exam_quota_status
 from student.models import Student
 
 from dashboard.serializers.exam.exam import (
@@ -59,9 +61,9 @@ from dashboard.serializers.exam.exam import (
     QuestionSerializer,
     ResultSerializer,
     ResultTrialSerializer,
-    StudentUnsubscribedExamLimitSerializer,
+    StudentExamLimitSerializer,
+    StudentExamQuotaOverrideUpdateSerializer,
     TopStudentResultSerializer,
-    UnsubscribedExamConfigSerializer,
     YearSerializer,
     answer_payload_matches_existing,
 )
@@ -404,7 +406,16 @@ def _result_detail_payload(result, trial):
     if trial and trial.exam_score:
         is_succeeded = trial.score >= (Exam.PASSING_PERCENT / 100) * trial.exam_score
 
-    unsubscribed_quota = unsubscribed_trial_quota_status(result.student)
+    access_type = (
+        StudentAccessType.UNSUBSCRIBED
+        if trial and trial.submitted_by_unsubscribed_user
+        else StudentAccessType.SUBSCRIBED
+    )
+    quota = exam_quota_status(
+        result.student,
+        exam_type=ExamMode.MAIN,
+        access_type=access_type,
+    )
 
     return {
         "active_trial": trial.id if trial else None,
@@ -420,9 +431,11 @@ def _result_detail_payload(result, trial):
         "is_succeeded": is_succeeded,
         "has_unsubscribed_submission": result.has_unsubscribed_submission,
         "submitted_by_unsubscribed_user": trial.submitted_by_unsubscribed_user if trial else False,
-        "unsubscribed_exam_max_trials": unsubscribed_quota['limits']['total'],
-        "unsubscribed_exam_trials_used": unsubscribed_quota['usage']['total'],
-        "unsubscribed_exam_trials_remaining": unsubscribed_quota['remaining']['total'],
+        "quota_access_type": access_type,
+        "effective_trial_limits": quota['limits'],
+        "trial_usage": quota['usage'],
+        "trial_remaining": quota['remaining'],
+        "can_start": quota['can_start'],
         "student_trials": result.trial,
         "is_trials_finished": result.is_trials_finished,
         "number_of_mcq": mcq_submissions.count(),
@@ -482,32 +495,25 @@ class ExamDetailView(generics.RetrieveAPIView):
     permission_classes = STAFF_PERMISSIONS
 
 
-class ExamConfigView(APIView):
+class ExamConfigListCreateView(generics.ListCreateAPIView):
+    serializer_class = ExamConfigSerializer
     permission_classes = STAFF_PERMISSIONS
 
-    def get(self, request):
-        return Response(ExamConfigSerializer(ExamConfig.load()).data)
+    def get_queryset(self):
+        for student_type in StudentAccessType.values:
+            ExamConfig.load(student_type)
+        return ExamConfig.objects.all()
 
-    def patch(self, request):
-        serializer = ExamConfigSerializer(
-            ExamConfig.load(), data=request.data, partial=True
+    def patch(self, request, *args, **kwargs):
+        """Keep the old root PATCH useful while selecting the row in the body."""
+        student_type = request.data.get(
+            'student_type', StudentAccessType.SUBSCRIBED
         )
-        serializer.is_valid(raise_exception=True)
-        serializer.save()
-        return Response(serializer.data)
-
-
-class UnsubscribedExamConfigView(APIView):
-    permission_classes = STAFF_PERMISSIONS
-
-    def get(self, request):
-        return Response(
-            UnsubscribedExamConfigSerializer(UnsubscribedExamConfig.load()).data
-        )
-
-    def patch(self, request):
-        serializer = UnsubscribedExamConfigSerializer(
-            UnsubscribedExamConfig.load(),
+        if student_type not in StudentAccessType.values:
+            raise ValidationError({'student_type': 'Invalid student type.'})
+        instance = ExamConfig.load(student_type)
+        serializer = self.get_serializer(
+            instance,
             data=request.data,
             partial=True,
         )
@@ -516,54 +522,98 @@ class UnsubscribedExamConfigView(APIView):
         return Response(serializer.data)
 
 
-class StudentUnsubscribedExamLimitView(generics.RetrieveUpdateAPIView):
-    queryset = Student.objects.select_related('user')
-    serializer_class = StudentUnsubscribedExamLimitSerializer
+class ExamConfigDetailView(generics.RetrieveUpdateAPIView):
+    queryset = ExamConfig.objects.all()
+    serializer_class = ExamConfigSerializer
     permission_classes = STAFF_PERMISSIONS
-    lookup_url_kwarg = 'student_id'
+    lookup_field = 'student_type'
+    lookup_url_kwarg = 'student_type'
+
+    def get_object(self):
+        student_type = self.kwargs['student_type']
+        if student_type not in StudentAccessType.values:
+            raise Http404
+        return ExamConfig.load(student_type)
 
 
-class StudentUnsubscribedExamLimitListView(generics.ListAPIView):
-    """Search students and inspect their effective guest main-exam allowance."""
+class StudentExamLimitView(APIView):
+    permission_classes = STAFF_PERMISSIONS
 
-    serializer_class = StudentUnsubscribedExamLimitSerializer
+    def get_student(self, student_id):
+        return get_object_or_404(
+            Student.objects.select_related('user').prefetch_related(
+                'exam_quota_overrides'
+            ),
+            id=student_id,
+        )
+
+    def get(self, request, student_id):
+        student = self.get_student(student_id)
+        return Response(StudentExamLimitSerializer(
+            student,
+            context={'request': request, 'include_usage': True},
+        ).data)
+
+    @transaction.atomic
+    def patch(self, request, student_id):
+        student = get_object_or_404(Student.objects.select_for_update(), id=student_id)
+        serializer = StudentExamQuotaOverrideUpdateSerializer(
+            data=request.data,
+            context={'student': student},
+        )
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        student = self.get_student(student_id)
+        return Response(StudentExamLimitSerializer(
+            student,
+            context={'request': request, 'include_usage': True},
+        ).data)
+
+
+class StudentExamLimitListView(generics.ListAPIView):
+    """Search students and inspect the complete custom quota matrix."""
+
+    serializer_class = StudentExamLimitSerializer
     permission_classes = STAFF_PERMISSIONS
     pagination_class = CustomPageNumberPagination
     filter_backends = [SearchFilter, OrderingFilter]
     search_fields = ['name', 'user__username', 'code', 'parent_phone']
-    ordering_fields = [
-        'id',
-        'name',
-        'created_at',
-        'unsubscribed_exam_max_trials',
-        'unsubscribed_trials_used',
-    ]
+    ordering_fields = ['id', 'name', 'created_at']
     ordering = ['name', 'id']
 
     def get_queryset(self):
-        unsubscribed_usage = (
-            ResultTrial.objects.filter(
-                result__student_id=OuterRef('pk'),
-                result__exam__student_id=OuterRef('pk'),
-                submitted_by_unsubscribed_user=True,
-            )
-            .values('result__student_id')
-            .annotate(total=Count('id'))
-            .values('total')[:1]
-        )
-        queryset = Student.objects.select_related('user').annotate(
-            unsubscribed_trials_used=Coalesce(
-                Subquery(unsubscribed_usage, output_field=IntegerField()),
-                Value(0),
-            )
+        queryset = Student.objects.select_related('user').prefetch_related(
+            'exam_quota_overrides'
         )
         has_custom_limit = self.request.query_params.get('has_custom_limit')
+        exam_type = self.request.query_params.get('exam_type')
+        student_type = self.request.query_params.get('student_type')
+        combination = {}
+        if exam_type:
+            combination['exam_quota_overrides__exam_type'] = exam_type
+        if student_type:
+            combination['exam_quota_overrides__student_type'] = student_type
+
         if has_custom_limit is not None:
             if _bool(has_custom_limit):
-                queryset = queryset.filter(unsubscribed_exam_max_trials__isnull=False)
+                queryset = queryset.filter(
+                    **(combination or {'exam_quota_overrides__isnull': False})
+                )
+            elif combination:
+                override_filter = {
+                    key.removeprefix('exam_quota_overrides__'): value
+                    for key, value in combination.items()
+                }
+                queryset = queryset.exclude(
+                    id__in=StudentExamQuotaOverride.objects.filter(
+                        **override_filter
+                    ).values('student_id')
+                )
             else:
-                queryset = queryset.filter(unsubscribed_exam_max_trials__isnull=True)
-        return queryset
+                queryset = queryset.filter(exam_quota_overrides__isnull=True)
+        elif combination:
+            queryset = queryset.filter(**combination)
+        return queryset.distinct()
 
 
 class QuestionCategoryListCreateView(generics.ListCreateAPIView):
@@ -888,24 +938,9 @@ class ResultListView(generics.ListAPIView):
     ordering = ["-added"]
 
     def get_queryset(self):
-        unsubscribed_usage = (
-            ResultTrial.objects.filter(
-                result__student_id=OuterRef('student_id'),
-                result__exam__student_id=OuterRef('student_id'),
-                submitted_by_unsubscribed_user=True,
-            )
-            .values('result__student_id')
-            .annotate(total=Count('id'))
-            .values('total')[:1]
-        )
         queryset = Result.objects.filter(trials__isnull=False).select_related(
             "student", "student__user", "exam", "exam__course"
-        ).prefetch_related("trials").annotate(
-            unsubscribed_trials_used=Coalesce(
-                Subquery(unsubscribed_usage, output_field=IntegerField()),
-                Value(0),
-            )
-        ).distinct()
+        ).prefetch_related("trials").distinct()
         submitted = self.request.query_params.get("submitted")
         if submitted is not None:
             if _bool(submitted):
@@ -1108,7 +1143,7 @@ class ExamsTakenByStudentAPIView(generics.ListAPIView):
             student=student,
             results__student=student,
             results__trials__isnull=False,
-        ).select_related("course").prefetch_related("categories").distinct()
+        ).select_related("student", "course").prefetch_related("categories").distinct()
         search = self.request.query_params.get("search")
         if search:
             queryset = queryset.filter(Q(title__icontains=search))
@@ -1196,3 +1231,6 @@ class DeleteFirstResultTrialForExamView(APIView):
         if deleted_count == 0:
             return Response({"message": "لم يتم العثور على محاولات للحذف لأي نتيجة", "exam_id": exam.id, "exam_title": exam.title}, status=status.HTTP_400_BAD_REQUEST)
         return Response({"message": f"تم حذف المحاولة الأولى لـ {deleted_count} نتيجة بنجاح", "exam_id": exam.id, "exam_title": exam.title, "trials_deleted": deleted_count})
+
+    def post(self, request, exam_id):
+        return self.delete(request, exam_id)

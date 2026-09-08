@@ -23,6 +23,17 @@ class QuestionType(models.TextChoices):
     MCQ = 'MCQ', _('Multiple Choice Question')
     ESSAY = 'ESSAY', _('Essay Question')
 
+
+class StudentAccessType(models.TextChoices):
+    SUBSCRIBED = 'subscribed_student', _('Subscribed student')
+    UNSUBSCRIBED = 'unsubscribed_student', _('Unsubscribed student')
+
+
+class ExamMode(models.TextChoices):
+    MAIN = 'main_exam', _('Main exam')
+    TEMP = 'temp_exam', _('Temp exam')
+
+
 class Exam(models.Model):
     """A randomized MCQ exam created and owned by a student."""
 
@@ -99,20 +110,38 @@ class Exam(models.Model):
 
 
 class ExamConfig(models.Model):
-    """Global limits for newly started main-exam trials."""
+    """Shared main/temp limits for one student access type."""
 
+    student_type = models.CharField(
+        max_length=30,
+        choices=StudentAccessType.choices,
+        default=StudentAccessType.SUBSCRIBED,
+        unique=True,
+    )
     max_trials_per_day = models.PositiveIntegerField(default=3)
     max_trials_per_week = models.PositiveIntegerField(default=21)
     max_trials_per_month = models.PositiveIntegerField(default=90)
+    max_questions_per_exam = models.PositiveIntegerField(default=10)
 
     class Meta:
-        constraints = [
-            _check_constraint(condition=models.Q(id=1), name='single_exam_config'),
-        ]
+        ordering = ['student_type']
 
     @classmethod
-    def load(cls):
-        config, _ = cls.objects.get_or_create(pk=1)
+    def load(cls, student_type=StudentAccessType.SUBSCRIBED):
+        if student_type not in StudentAccessType.values:
+            raise ValueError(f'Unsupported student access type: {student_type}')
+        defaults = {
+            'max_trials_per_day': 3,
+            'max_trials_per_week': 21,
+            'max_trials_per_month': 90,
+            'max_questions_per_exam': (
+                100 if student_type == StudentAccessType.SUBSCRIBED else 10
+            ),
+        }
+        config, _ = cls.objects.get_or_create(
+            student_type=student_type,
+            defaults=defaults,
+        )
         return config
 
     def clean(self):
@@ -121,57 +150,73 @@ class ExamConfig(models.Model):
             raise ValidationError(_("The weekly limit cannot be less than the daily limit."))
         if self.max_trials_per_week > self.max_trials_per_month:
             raise ValidationError(_("The monthly limit cannot be less than the weekly limit."))
-
-    def save(self, *args, **kwargs):
-        self.pk = 1
-        self.full_clean()
-        super().save(*args, **kwargs)
-
-    def __str__(self):
-        return "Main exam trial limits"
-
-
-class UnsubscribedExamConfig(models.Model):
-    """Singleton limits for main exams taken without a course subscription."""
-
-    max_trials = models.PositiveIntegerField(
-        default=3,
-        help_text="Lifetime main-exam trial starts allowed per unsubscribed student.",
-    )
-    max_questions_per_exam = models.PositiveIntegerField(
-        default=10,
-        help_text="Maximum questions in a main exam created or started without a subscription.",
-    )
-
-    class Meta:
-        constraints = [
-            _check_constraint(
-                condition=models.Q(id=1),
-                name='single_unsub_exam_config',
-            ),
-            _check_constraint(
-                condition=models.Q(max_questions_per_exam__gte=1),
-                name='unsub_exam_questions_gte_1',
-            ),
-        ]
-
-    @classmethod
-    def load(cls):
-        config, _ = cls.objects.get_or_create(pk=1)
-        return config
-
-    def clean(self):
-        super().clean()
         if self.max_questions_per_exam < 1:
             raise ValidationError(_("The maximum question count must be at least 1."))
 
     def save(self, *args, **kwargs):
-        self.pk = 1
         self.full_clean()
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return "Unsubscribed main exam limits"
+        return f"{self.get_student_type_display()} exam limits"
+
+
+class StudentExamQuotaOverride(models.Model):
+    """Optional calendar overrides for one student/access/exam combination."""
+
+    student = models.ForeignKey(
+        Student,
+        on_delete=models.CASCADE,
+        related_name='exam_quota_overrides',
+    )
+    exam_type = models.CharField(max_length=20, choices=ExamMode.choices)
+    student_type = models.CharField(max_length=30, choices=StudentAccessType.choices)
+    max_trials_per_day = models.PositiveIntegerField(null=True, blank=True)
+    max_trials_per_week = models.PositiveIntegerField(null=True, blank=True)
+    max_trials_per_month = models.PositiveIntegerField(null=True, blank=True)
+
+    class Meta:
+        ordering = ['student_id', 'exam_type', 'student_type']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['student', 'exam_type', 'student_type'],
+                name='unique_student_exam_quota_override',
+            ),
+        ]
+
+    def clean(self):
+        super().clean()
+        config = ExamConfig.load(self.student_type)
+        daily = (
+            config.max_trials_per_day
+            if self.max_trials_per_day is None
+            else self.max_trials_per_day
+        )
+        weekly = (
+            config.max_trials_per_week
+            if self.max_trials_per_week is None
+            else self.max_trials_per_week
+        )
+        monthly = (
+            config.max_trials_per_month
+            if self.max_trials_per_month is None
+            else self.max_trials_per_month
+        )
+        if daily > weekly:
+            raise ValidationError(_("The effective weekly limit cannot be less than the daily limit."))
+        if weekly > monthly:
+            raise ValidationError(_("The effective monthly limit cannot be less than the weekly limit."))
+
+    def save(self, *args, **kwargs):
+        self.full_clean()
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return (
+            f"{self.student} | {self.get_exam_type_display()} | "
+            f"{self.get_student_type_display()}"
+        )
+
 
 class QuestionCategory(models.Model):
     title = models.CharField(max_length=200)
@@ -371,20 +416,16 @@ class Result(models.Model):
 
     @property
     def is_trials_finished(self):
-        """Whether a guest has exhausted the lifetime allowance for this exam."""
+        """Whether the applicable current-period main-exam quota is exhausted."""
         if self.has_unsubmitted_trial:
             return False
 
-        from subscription.access import student_has_course_access
+        from .services import main_exam_quota_status
 
-        if student_has_course_access(self.student, self.exam.course):
-            # Subscribed limits reset by calendar period, so they are never a
-            # permanently finished set of trials.
-            return False
-
-        from .services import unsubscribed_trial_quota_status
-
-        return not unsubscribed_trial_quota_status(self.student)['can_start']
+        return not main_exam_quota_status(
+            self.student,
+            self.exam.course,
+        )['can_start']
 
     @property
     def has_unsubmitted_trial(self):
@@ -503,6 +544,13 @@ class StudentBank(models.Model):
 class TempExam(models.Model):
     student = models.ForeignKey(Student, on_delete=models.CASCADE, related_name='temp_exams')
     course = models.ForeignKey(Course, on_delete=models.SET_NULL, null=True, blank=True)
+    student_type = models.CharField(
+        max_length=30,
+        choices=StudentAccessType.choices,
+        default=StudentAccessType.UNSUBSCRIBED,
+        db_index=True,
+        help_text="Access type captured when the temp exam was created.",
+    )
     categories = models.ManyToManyField(
         QuestionCategory,
         blank=True,

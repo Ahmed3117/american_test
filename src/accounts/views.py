@@ -935,6 +935,9 @@ class DeleteAccountView(APIView):
             },
             status=status.HTTP_200_OK
         )
+
+    def post(self, request):
+        return self.delete(request)
     
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
@@ -972,7 +975,10 @@ def change_password(request):
 @api_view(['POST'])
 @permission_classes([IsAdminUser])
 def create_admin_user(request):
-    serializer = UserSerializer(data=request.data)
+    data = request.data.copy() if hasattr(request.data, 'copy') else dict(request.data)
+    if not data.get('user_type'):
+        data['user_type'] = 'admin'
+    serializer = UserSerializer(data=data)
     if serializer.is_valid():
         user = serializer.save(is_staff=True, is_superuser=False)
         refresh = RefreshToken.for_user(user)
@@ -1220,7 +1226,7 @@ def update_student_max_devices(request, pk):
     return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-@api_view(['DELETE'])
+@api_view(['DELETE', 'POST'])
 @permission_classes([IsAdminUser])
 def remove_student_device(request, pk, device_id):
     """

@@ -28,7 +28,7 @@ from exam.models import (
     StudentBank,
     Submission,
     TempExam,
-    UnsubscribedExamConfig,
+    StudentExamQuotaOverride,
     Year,
 )
 
@@ -617,24 +617,14 @@ class ExamAdmin(admin.ModelAdmin):
 
 @admin.register(ExamConfig)
 class ExamConfigAdmin(admin.ModelAdmin):
-    list_display = ('max_trials_per_day', 'max_trials_per_week', 'max_trials_per_month')
-
-    def has_add_permission(self, request):
-        return not ExamConfig.objects.exists()
-
-    def has_delete_permission(self, request, obj=None):
-        return False
+    list_display = ('student_type', 'max_trials_per_day', 'max_trials_per_week', 'max_trials_per_month', 'max_questions_per_exam')
 
 
-@admin.register(UnsubscribedExamConfig)
-class UnsubscribedExamConfigAdmin(admin.ModelAdmin):
-    list_display = ('max_trials', 'max_questions_per_exam')
-
-    def has_add_permission(self, request):
-        return not UnsubscribedExamConfig.objects.exists()
-
-    def has_delete_permission(self, request, obj=None):
-        return False
+@admin.register(StudentExamQuotaOverride)
+class StudentExamQuotaOverrideAdmin(admin.ModelAdmin):
+    list_display = ('student', 'exam_type', 'student_type', 'max_trials_per_day', 'max_trials_per_week', 'max_trials_per_month')
+    search_fields = ('student__name', 'student__user__username')
+    list_filter = ('exam_type', 'student_type')
 
 
 @admin.register(Year)
