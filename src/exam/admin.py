@@ -425,7 +425,13 @@ class QuestionAdmin(admin.ModelAdmin):
     def images_count(self, obj):
         return obj.images.count()
 
-admin.site.register(QuestionCategory)
+@admin.register(QuestionCategory)
+class QuestionCategoryAdmin(admin.ModelAdmin):
+    list_display = ('id', 'title', 'course')
+    list_filter = ('course',)
+    search_fields = ('title', 'course__name')
+
+
 admin.site.register(Question, QuestionAdmin)
 admin.site.register(Answer)
 

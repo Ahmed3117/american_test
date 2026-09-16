@@ -258,7 +258,12 @@ class Question(models.Model):
         QuestionCategory, on_delete=models.CASCADE, null=True, blank=True, db_index=True, related_name='categoryquestions'
     )
     course = models.ForeignKey(
-        Course, on_delete=models.CASCADE, null=True, blank=True, db_index=True, related_name='coursequestions'
+        Course,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        db_index=True,
+        related_name='coursequestions',
     )
     is_active = models.BooleanField(default=True)
     created = models.DateTimeField(auto_now_add=True)
@@ -299,6 +304,19 @@ class Question(models.Model):
 
     def __str__(self):
         return str(self.id) + " | " + str(self.question_type) + " | " + self.text
+
+    def save(self, *args, **kwargs):
+        if self.course_id is None and self.category_id is not None:
+            category_course_id = (
+                QuestionCategory.objects.filter(pk=self.category_id)
+                .values_list('course_id', flat=True)
+                .first()
+            )
+            if category_course_id is not None:
+                self.course_id = category_course_id
+                if kwargs.get('update_fields') is not None:
+                    kwargs['update_fields'] = set(kwargs['update_fields']) | {'course'}
+        super().save(*args, **kwargs)
 
 class QuestionImage(models.Model):
     """Multiple images per question.
