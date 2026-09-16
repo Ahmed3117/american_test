@@ -15,5 +15,12 @@
       </a>
     </li>
   {% endif %}
+  {% if show_sync_question_courses %}
+    <li>
+      <a href="{% url 'admin:exam_question_sync_courses_from_categories' %}">
+        Sync courses from categories
+      </a>
+    </li>
+  {% endif %}
   {{ block.super }}
 {% endblock %}

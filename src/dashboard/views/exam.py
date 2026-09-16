@@ -544,7 +544,7 @@ class StudentExamLimitView(APIView):
             Student.objects.select_related('user').prefetch_related(
                 'exam_quota_overrides'
             ),
-            id=student_id,
+            user_id=student_id,
         )
 
     def get(self, request, student_id):
@@ -556,7 +556,10 @@ class StudentExamLimitView(APIView):
 
     @transaction.atomic
     def patch(self, request, student_id):
-        student = get_object_or_404(Student.objects.select_for_update(), id=student_id)
+        student = get_object_or_404(
+            Student.objects.select_for_update(),
+            user_id=student_id,
+        )
         serializer = StudentExamQuotaOverrideUpdateSerializer(
             data=request.data,
             context={'student': student},
@@ -1137,8 +1140,16 @@ class ExamsTakenByStudentAPIView(generics.ListAPIView):
     serializer_class = FlattenedExamResultSerializer
     permission_classes = STAFF_PERMISSIONS
 
+    def get_student(self):
+        if not hasattr(self, '_student'):
+            self._student = get_object_or_404(
+                Student.objects.select_related('user'),
+                user_id=self.kwargs["student_id"],
+            )
+        return self._student
+
     def get_queryset(self):
-        student = get_object_or_404(Student, id=self.kwargs["student_id"])
+        student = self.get_student()
         queryset = Exam.objects.filter(
             student=student,
             results__student=student,
@@ -1151,7 +1162,8 @@ class ExamsTakenByStudentAPIView(generics.ListAPIView):
 
     def get_serializer_context(self):
         context = super().get_serializer_context()
-        context["student_id"] = self.kwargs["student_id"]
+        # Result.student still references the Student profile internally.
+        context["student_id"] = self.get_student().id
         return context
 
 
@@ -1160,7 +1172,10 @@ class ExamsNotTakenByStudentAPIView(generics.ListAPIView):
     permission_classes = STAFF_PERMISSIONS
 
     def get_queryset(self):
-        student = get_object_or_404(Student, id=self.kwargs["student_id"])
+        student = get_object_or_404(
+            Student,
+            user_id=self.kwargs["student_id"],
+        )
         taken_trial = ResultTrial.objects.filter(
             result__student=student,
             result__exam_id=OuterRef("pk"),

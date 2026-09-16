@@ -245,13 +245,20 @@ class ExamConfigSerializer(serializers.ModelSerializer):
 
 class StudentExamLimitSerializer(serializers.ModelSerializer):
     student_id = serializers.IntegerField(source='id', read_only=True)
+    user_id = serializers.IntegerField(source='user.id', read_only=True)
     student_name = serializers.CharField(source='name', read_only=True)
     student_phone = serializers.CharField(source='user.username', read_only=True)
     limits = serializers.SerializerMethodField()
 
     class Meta:
         model = Student
-        fields = ['student_id', 'student_name', 'student_phone', 'limits']
+        fields = [
+            'student_id',
+            'user_id',
+            'student_name',
+            'student_phone',
+            'limits',
+        ]
 
     def _configs(self):
         if not hasattr(self, '_config_cache'):

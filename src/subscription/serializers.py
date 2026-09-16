@@ -1,5 +1,6 @@
 from rest_framework import serializers
 
+from accounts.models import User
 from course.models import Course
 from course.serializers import CourseSerializer
 
@@ -212,6 +213,73 @@ class SubscribePlanSerializer(serializers.Serializer):
         unique_ids = list(dict.fromkeys(value))
         plan = self.context["plan"]
         allowed_courses = plan.number_of_allowed_courses_to_subscribe
+        if len(unique_ids) != allowed_courses:
+            raise serializers.ValidationError(
+                f"يجب اختيار {allowed_courses} مادة/مواد بالضبط لهذه الباقة"
+            )
+        courses_count = Course.objects.filter(id__in=unique_ids, is_active=True).count()
+        if courses_count != len(unique_ids):
+            raise serializers.ValidationError("مادة أو أكثر من المواد المحددة غير موجودة أو غير نشطة")
+        return unique_ids
+
+
+class DashboardSubscriptionCreateSerializer(serializers.Serializer):
+    user_id = serializers.IntegerField(min_value=1)
+    plan_id = serializers.IntegerField(min_value=1)
+    course_ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1),
+        allow_empty=False,
+    )
+    mark_paid = serializers.BooleanField(required=False, default=False)
+
+    def validate_course_ids(self, value):
+        if len(value) != len(set(value)):
+            raise serializers.ValidationError("لا يمكن اختيار نفس المادة أكثر من مرة")
+
+        return list(dict.fromkeys(value))
+
+    def validate(self, attrs):
+        plan = Plan.objects.filter(pk=attrs["plan_id"]).first()
+        if plan is None:
+            raise serializers.ValidationError({"plan_id": "الخطة غير موجودة"})
+        if not plan.is_active:
+            raise serializers.ValidationError({"plan_id": "هذه الخطة غير نشطة"})
+        if not plan.is_currently_available():
+            raise serializers.ValidationError({"plan_id": "هذه الخطة خارج فترة الاشتراك الحالية"})
+
+        user = User.objects.filter(pk=attrs["user_id"], user_type="student").first()
+        if user is None:
+            raise serializers.ValidationError({"user_id": "الطالب غير موجود"})
+
+        allowed_courses = plan.number_of_allowed_courses_to_subscribe
+        if len(attrs["course_ids"]) != allowed_courses:
+            raise serializers.ValidationError(
+                {"course_ids": f"يجب اختيار {allowed_courses} مادة/مواد بالضبط لهذه الباقة"}
+            )
+        courses_count = Course.objects.filter(id__in=attrs["course_ids"], is_active=True).count()
+        if courses_count != len(attrs["course_ids"]):
+            raise serializers.ValidationError(
+                {"course_ids": "مادة أو أكثر من المواد المحددة غير موجودة أو غير نشطة"}
+            )
+
+        attrs["plan"] = plan
+        attrs["user"] = user
+        return attrs
+
+
+class SubscriptionCoursesSerializer(serializers.Serializer):
+    course_ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1),
+        allow_empty=False,
+    )
+
+    def validate_course_ids(self, value):
+        if len(value) != len(set(value)):
+            raise serializers.ValidationError("لا يمكن اختيار نفس المادة أكثر من مرة")
+
+        unique_ids = list(dict.fromkeys(value))
+        subscription = self.context["subscription"]
+        allowed_courses = subscription.plan.number_of_allowed_courses_to_subscribe
         if len(unique_ids) != allowed_courses:
             raise serializers.ValidationError(
                 f"يجب اختيار {allowed_courses} مادة/مواد بالضبط لهذه الباقة"

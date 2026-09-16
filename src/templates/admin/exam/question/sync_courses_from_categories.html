@@ -1,0 +1,40 @@
+{% extends "admin/base_site.html" %}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Home</a>
+    &rsaquo; <a href="{{ question_changelist_url }}">Questions</a>
+    &rsaquo; Sync courses from categories
+  </div>
+{% endblock %}
+
+{% block content %}
+  <p>
+    This sets each eligible question's course to the course selected on its
+    category. Existing incorrect question courses will be replaced.
+  </p>
+
+  <h2>Preview</h2>
+  <ul>
+    <li>All questions: {{ preview.total }}</li>
+    <li>Eligible questions: {{ preview.eligible }}</li>
+    <li>Already correct: {{ preview.already_matching }}</li>
+    <li>Questions that will be updated: {{ preview.to_update }}</li>
+    <li>Empty question courses that will be filled: {{ preview.empty_course_to_fill }}</li>
+    <li>Incorrect question courses that will be replaced: {{ preview.wrong_course_to_replace }}</li>
+    <li>Skipped because no category is selected: {{ preview.without_category }}</li>
+    <li>Skipped because the category has no course: {{ preview.category_without_course }}</li>
+  </ul>
+
+  {% if preview.to_update %}
+    <form method="post">
+      {% csrf_token %}
+      <input type="hidden" name="confirm" value="yes">
+      <input type="submit" value="Yes, sync question courses">
+      <a href="{{ question_changelist_url }}" class="button cancel-link">Cancel</a>
+    </form>
+  {% else %}
+    <p class="success">Every eligible question already has the correct course.</p>
+    <a href="{{ question_changelist_url }}" class="button">Return to questions</a>
+  {% endif %}
+{% endblock %}

@@ -8,7 +8,7 @@ from django.core.exceptions import PermissionDenied
 from django.core.files import File
 from django.core.files.storage import storages
 from django.db import transaction
-from django.db.models import Count, Max, Q
+from django.db.models import Count, F, Max, Q
 from django.shortcuts import redirect
 from django.template.response import TemplateResponse
 from django.urls import path, reverse
@@ -70,11 +70,15 @@ class QuestionAdmin(admin.ModelAdmin):
     def has_sync_local_audio_to_r2_permission(self, request):
         return request.user.is_active and request.user.is_staff and request.user.is_superuser
 
+    def has_sync_question_courses_permission(self, request):
+        return request.user.is_active and request.user.is_staff and request.user.is_superuser
+
     def changelist_view(self, request, extra_context=None):
         extra_context = {
             **(extra_context or {}),
             'show_add_all_questions_to_exam': self.has_add_all_questions_to_exam_permission(request),
             'show_sync_local_audio_to_r2': self.has_sync_local_audio_to_r2_permission(request),
+            'show_sync_question_courses': self.has_sync_question_courses_permission(request),
         }
         return super().changelist_view(request, extra_context=extra_context)
 
@@ -90,8 +94,84 @@ class QuestionAdmin(admin.ModelAdmin):
                 self.admin_site.admin_view(self.sync_local_audio_to_r2_view),
                 name='exam_question_sync_local_audio_to_r2',
             ),
+            path(
+                'sync-courses-from-categories/',
+                self.admin_site.admin_view(self.sync_question_courses_view),
+                name='exam_question_sync_courses_from_categories',
+            ),
         ]
         return custom_urls + super().get_urls()
+
+    @staticmethod
+    def _question_course_sync_preview():
+        eligible = Question.objects.filter(category__course__isnull=False)
+        already_matching = eligible.filter(course_id=F('category__course_id')).count()
+        eligible_count = eligible.count()
+        return {
+            'total': Question.objects.count(),
+            'eligible': eligible_count,
+            'already_matching': already_matching,
+            'to_update': eligible_count - already_matching,
+            'empty_course_to_fill': eligible.filter(course__isnull=True).count(),
+            'wrong_course_to_replace': eligible.filter(course__isnull=False).exclude(
+                course_id=F('category__course_id')
+            ).count(),
+            'without_category': Question.objects.filter(category__isnull=True).count(),
+            'category_without_course': Question.objects.filter(
+                category__isnull=False,
+                category__course__isnull=True,
+            ).count(),
+        }
+
+    @staticmethod
+    @transaction.atomic
+    def _sync_question_courses_from_categories():
+        updated = 0
+        categories = (
+            QuestionCategory.objects.select_for_update()
+            .exclude(course__isnull=True)
+            .order_by('id')
+            .values_list('id', 'course_id')
+        )
+        for category_id, course_id in categories.iterator(chunk_size=500):
+            updated += (
+                Question.objects.filter(category_id=category_id)
+                .exclude(course_id=course_id)
+                .update(course_id=course_id)
+            )
+        return updated
+
+    def sync_question_courses_view(self, request):
+        if not self.has_sync_question_courses_permission(request):
+            raise PermissionDenied
+
+        preview = self._question_course_sync_preview()
+        if request.method == 'POST' and request.POST.get('confirm') == 'yes':
+            updated = self._sync_question_courses_from_categories()
+            self.message_user(
+                request,
+                (
+                    f'Updated {updated} question course(s) from their category. '
+                    f"Skipped {preview['without_category']} question(s) without a category "
+                    f"and {preview['category_without_course']} whose category has no course."
+                ),
+                level=messages.SUCCESS,
+            )
+            return redirect('admin:exam_question_changelist')
+
+        context = {
+            **self.admin_site.each_context(request),
+            'title': 'Sync question courses from categories',
+            'opts': self.model._meta,
+            'preview': preview,
+            'question_changelist_url': reverse('admin:exam_question_changelist'),
+        }
+        request.current_app = self.admin_site.name
+        return TemplateResponse(
+            request,
+            'admin/exam/question/sync_courses_from_categories.html',
+            context,
+        )
 
     @staticmethod
     def _local_question_audio_files():
