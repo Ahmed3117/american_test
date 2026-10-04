@@ -45,7 +45,7 @@ class UserSerializer(serializers.ModelSerializer):
         model = User
         fields = (
             'id', 'username', 'email', 'password', 'name','government',
-            'is_staff', 'is_superuser', 'user_type', 'gender', 'parent_phone',
+            'is_staff', 'is_superuser', 'user_type', 'gender', 'academic_year', 'parent_phone',
             'created_at'
         )
         extra_kwargs = {
@@ -54,6 +54,7 @@ class UserSerializer(serializers.ModelSerializer):
             'email': {'required': False, 'allow_null': True, 'allow_blank': True},
             'user_type': {'required': True},  # Now required since field is NOT NULL
             'gender': {'required': False},
+            'academic_year': {'required': False},
             'parent_phone': {'required': False, 'allow_null': True, 'allow_blank': True},
             'password': {'required': False},  # Make password optional for updates
         }
@@ -122,6 +123,7 @@ class UserSerializer(serializers.ModelSerializer):
             is_superuser=validated_data.get('is_superuser', False),
             user_type=validated_data.get('user_type', None),
             gender=validated_data.get('gender', User.Gender.NOT_DEFINED),
+            academic_year=validated_data.get('academic_year', User.AcademicYear.NOT_KNOWN),
             parent_phone=validated_data.get('parent_phone', None),
             government=validated_data.get('government', None),
         )
@@ -148,7 +150,7 @@ class PublicUserSerializer(serializers.ModelSerializer):
         model = User
         fields = (
             'id', 'username', 'email', 'name', 'government', 'user_type',
-            'gender', 'parent_phone',
+            'gender', 'academic_year', 'parent_phone',
             'is_banned', 'banned_at', 'ban_reason', 'created_at'
         )
 
@@ -233,7 +235,7 @@ class StudentDeviceListSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = [
-            'id', 'username', 'name', 'gender', 'max_allowed_devices',
+            'id', 'username', 'name', 'gender', 'academic_year', 'max_allowed_devices',
             'active_devices_count', 'is_banned', 'banned_at', 'ban_reason', 'devices'
         ]
     
@@ -262,6 +264,7 @@ class DeletedUserArchiveSerializer(serializers.Serializer):
     email = serializers.EmailField(read_only=True)
     user_type = serializers.CharField(read_only=True)
     gender = serializers.CharField(read_only=True)
+    academic_year = serializers.CharField(read_only=True)
     parent_phone = serializers.CharField(read_only=True)
     government = serializers.CharField(read_only=True)
     was_banned = serializers.BooleanField(read_only=True)

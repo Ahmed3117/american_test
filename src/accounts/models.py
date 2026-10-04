@@ -49,8 +49,16 @@ class GenderChoices(models.TextChoices):
 GENDER_CHOICES = GenderChoices.choices
 
 
+class AcademicYearChoices(models.TextChoices):
+    GRADE_10 = 'grade_10', 'Grade 10'
+    GRADE_11 = 'grade_11', 'Grade 11'
+    GRADE_12 = 'grade_12', 'Grade 12'
+    NOT_KNOWN = 'not_known', 'Not known'
+
+
 class User(AbstractUser):
     Gender = GenderChoices
+    AcademicYear = AcademicYearChoices
 
     name = models.CharField(max_length=100)
     otp = models.CharField(max_length=6, null=True, blank=True)
@@ -61,6 +69,12 @@ class User(AbstractUser):
         max_length=20,
         choices=GENDER_CHOICES,
         default=GenderChoices.NOT_DEFINED,
+    )
+    academic_year = models.CharField(
+        max_length=20,
+        choices=AcademicYearChoices.choices,
+        default=AcademicYearChoices.NOT_KNOWN,
+        db_index=True,
     )
     parent_phone = models.CharField(max_length=20, null=True, blank=True, help_text="Only applicable for students")
     government = models.CharField(choices=GOVERNMENT_CHOICES, max_length=2, null=True, blank=True)
@@ -290,6 +304,12 @@ class DeletedUserArchive(models.Model):
         max_length=20,
         choices=GENDER_CHOICES,
         default=GenderChoices.NOT_DEFINED,
+    )
+    academic_year = models.CharField(
+        max_length=20,
+        choices=AcademicYearChoices.choices,
+        default=AcademicYearChoices.NOT_KNOWN,
+        db_index=True,
     )
     parent_phone = models.CharField(max_length=20, null=True, blank=True)
     government = models.CharField(choices=GOVERNMENT_CHOICES, max_length=2, null=True, blank=True)

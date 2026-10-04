@@ -7,13 +7,13 @@ from django.contrib import messages
 
 @admin.register(User)
 class UserAdmin(BaseUserAdmin):
-    list_display = ('username', 'name', 'email', 'user_type', 'gender', 'is_staff', 'max_allowed_devices', 'get_active_devices')
-    list_filter = ('user_type', 'gender', 'is_staff', 'is_superuser', 'is_active', 'groups', 'government')
+    list_display = ('username', 'name', 'email', 'user_type', 'gender', 'academic_year', 'is_staff', 'max_allowed_devices', 'get_active_devices')
+    list_filter = ('user_type', 'gender', 'academic_year', 'is_staff', 'is_superuser', 'is_active', 'groups', 'government')
     search_fields = ('username', 'name', 'email')
     ordering = ('-date_joined',)
     fieldsets = (
         (None, {'fields': ('username', 'password')}),
-        ('Personal info', {'fields': ('name', 'email', 'gender')}),
+        ('Personal info', {'fields': ('name', 'email', 'gender', 'academic_year')}),
         ('User Type Specifics', {'fields': ('user_type', 'parent_phone')}),
         ('Device Management', {'fields': ('max_allowed_devices',)}),
         ('Location', {'fields': ('government',)}),
@@ -22,6 +22,9 @@ class UserAdmin(BaseUserAdmin):
         ('OTP', {'fields': ('otp', 'otp_created_at')}),
     )
     readonly_fields = ('last_login', 'date_joined', 'otp_created_at')
+    add_fieldsets = BaseUserAdmin.add_fieldsets + (
+        ('Student information', {'fields': ('academic_year',)}),
+    )
 
     # Profile image field removed from User model; no preview available
     

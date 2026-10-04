@@ -72,8 +72,25 @@ from dashboard.serializers.exam.exam import (
 STAFF_PERMISSIONS = [IsAuthenticated, IsAdminUser]
 
 
+class StudentAcademicYearFilter(filters.FilterSet):
+    academic_year = filters.BaseInFilter(field_name="user__academic_year", lookup_expr="in")
+
+    class Meta:
+        model = Student
+        fields = ["academic_year"]
+
+
+class ExamFilter(filters.FilterSet):
+    academic_year = filters.BaseInFilter(field_name="student__user__academic_year", lookup_expr="in")
+
+    class Meta:
+        model = Exam
+        fields = ["student", "course", "categories", "years", "created"]
+
+
 class ResultFilter(filters.FilterSet):
     gender = filters.BaseInFilter(field_name="student__user__gender", lookup_expr="in")
+    academic_year = filters.BaseInFilter(field_name="student__user__academic_year", lookup_expr="in")
     submitted_by_unsubscribed_user = filters.BooleanFilter(
         method="filter_submitted_by_unsubscribed_user"
     )
@@ -96,6 +113,7 @@ class ResultFilter(filters.FilterSet):
 
 class ResultTrialFilter(filters.FilterSet):
     gender = filters.BaseInFilter(field_name="result__student__user__gender", lookup_expr="in")
+    academic_year = filters.BaseInFilter(field_name="result__student__user__academic_year", lookup_expr="in")
 
     class Meta:
         model = ResultTrial
@@ -423,6 +441,7 @@ def _result_detail_payload(result, trial):
         "student_id": result.student_id,
         "student_name": result.student.name,
         "student_gender": result.student.user.gender,
+        "student_academic_year": result.student.user.academic_year,
         "exam_id": result.exam_id,
         "exam_title": result.exam.title,
         "exam_description": None,
@@ -467,7 +486,7 @@ class ExamListCreateView(generics.ListAPIView):
     serializer_class = ExamSerializer
     permission_classes = STAFF_PERMISSIONS
     filter_backends = [DjangoFilterBackend, OrderingFilter, SearchFilter]
-    filterset_fields = ["student", "course", "categories", "years", "created"]
+    filterset_class = ExamFilter
     search_fields = [
         "title", "course__name", "categories__title",
         "years__value", "student__name", "student__user__username", "student__code",
@@ -579,7 +598,8 @@ class StudentExamLimitListView(generics.ListAPIView):
     serializer_class = StudentExamLimitSerializer
     permission_classes = STAFF_PERMISSIONS
     pagination_class = CustomPageNumberPagination
-    filter_backends = [SearchFilter, OrderingFilter]
+    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    filterset_class = StudentAcademicYearFilter
     search_fields = ['name', 'user__username', 'code', 'parent_phone']
     ordering_fields = ['id', 'name', 'created_at']
     ordering = ['name', 'id']
@@ -958,7 +978,8 @@ class TopStudentResultsView(generics.ListAPIView):
 
     serializer_class = TopStudentResultSerializer
     permission_classes = [IsAuthenticated]
-    filter_backends = [SearchFilter]
+    filter_backends = [DjangoFilterBackend, SearchFilter]
+    filterset_class = StudentAcademicYearFilter
     search_fields = [
         "name",
         "user__username",
@@ -1133,7 +1154,7 @@ class ResultTrialsView(generics.ListAPIView):
 
     def get_queryset(self):
         result = get_object_or_404(Result, id=self.kwargs["result_id"])
-        return result.trials.all().order_by("trial")
+        return result.trials.select_related("result__student__user").order_by("trial")
 
 
 class ExamsTakenByStudentAPIView(generics.ListAPIView):
@@ -1154,7 +1175,7 @@ class ExamsTakenByStudentAPIView(generics.ListAPIView):
             student=student,
             results__student=student,
             results__trials__isnull=False,
-        ).select_related("student", "course").prefetch_related("categories").distinct()
+        ).select_related("student__user", "course").prefetch_related("categories").distinct()
         search = self.request.query_params.get("search")
         if search:
             queryset = queryset.filter(Q(title__icontains=search))
@@ -1183,7 +1204,7 @@ class ExamsNotTakenByStudentAPIView(generics.ListAPIView):
         queryset = Exam.objects.filter(student=student).annotate(
             has_been_taken=Exists(taken_trial)
         ).filter(has_been_taken=False).select_related(
-            "student", "course"
+            "student__user", "course"
         ).prefetch_related("categories").distinct()
         search = self.request.query_params.get("search")
         if search:
@@ -1203,7 +1224,7 @@ class ResultTrialListCreateView(generics.ListAPIView):
 
 
 class ResultTrialRetrieveUpdateDestroyView(generics.RetrieveAPIView):
-    queryset = ResultTrial.objects.select_related("result", "result__student", "result__exam")
+    queryset = ResultTrial.objects.select_related("result", "result__student__user", "result__exam")
     serializer_class = ResultTrialSerializer
     permission_classes = STAFF_PERMISSIONS
 

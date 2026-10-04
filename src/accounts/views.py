@@ -100,6 +100,7 @@ def signup(request):
         "name": "Student Name",
         "user_type": "student",
         "gender": "male",
+        "academic_year": "grade_10",
         "parent_phone": "01111111111",
         "government": "1"
     }
@@ -167,6 +168,7 @@ def verify_signup_otp(request):
         "otp_code": "123456",
         "user_type": "student",
         "gender": "male",
+        "academic_year": "grade_10",
         "parent_phone": "01111111111",
         "government": "1",
         "device_id": "optional_device_id",
@@ -904,6 +906,7 @@ class DeleteAccountView(APIView):
             email=user.email,
             user_type=user.user_type,
             gender=user.gender,
+            academic_year=user.academic_year,
             parent_phone=user.parent_phone,
             government=user.government,
             max_allowed_devices=user.max_allowed_devices,
@@ -919,6 +922,7 @@ class DeleteAccountView(APIView):
                 'email': user.email,
                 'user_type': user.user_type,
                 'gender': user.gender,
+                'academic_year': user.academic_year,
                 'parent_phone': user.parent_phone,
                 'government': user.government,
                 'created_at': user.created_at.isoformat() if user.created_at else None,
@@ -1052,6 +1056,7 @@ class UserDeleteAPIView(APIView):
                 'email': user.email,
                 'user_type': user.user_type,
                 'gender': user.gender,
+                'academic_year': user.academic_year,
                 'parent_phone': user.parent_phone,
                 'government': user.government,
                 'max_allowed_devices': user.max_allowed_devices,
@@ -1068,6 +1073,7 @@ class UserDeleteAPIView(APIView):
                 email=user.email,
                 user_type=user.user_type,
                 gender=user.gender,
+                academic_year=user.academic_year,
                 parent_phone=user.parent_phone,
                 government=user.government,
                 max_allowed_devices=user.max_allowed_devices,
@@ -1105,13 +1111,14 @@ class AdminUserFilter(filters.FilterSet):
 
 
 class StudentUserFilter(filters.FilterSet):
-    """Student filters with comma-separated support for government and gender."""
+    """Student filters supporting comma-separated profile choices."""
     government = filters.BaseInFilter(field_name='government', lookup_expr='in')
     gender = filters.BaseInFilter(field_name='gender', lookup_expr='in')
+    academic_year = filters.BaseInFilter(field_name='academic_year', lookup_expr='in')
 
     class Meta:
         model = User
-        fields = ['is_banned', 'government', 'gender']
+        fields = ['is_banned', 'government', 'gender', 'academic_year']
 
 
 class AdminsListView(generics.ListAPIView):
@@ -1459,7 +1466,7 @@ class DeletedUserArchiveListView(generics.ListAPIView):
     ordering_fields = ['id', 'deleted_at', 'original_created_at', 'username', 'name', 'gender']
     ordering = ['-deleted_at']
     search_fields = ['username', 'name', 'email']
-    filterset_fields = ['user_type', 'gender', 'was_banned']
+    filterset_fields = ['user_type', 'gender', 'academic_year', 'was_banned']
     
     
 class DeletedUserArchiveDetailView(generics.RetrieveAPIView):
@@ -1532,6 +1539,7 @@ class RestoreUserView(APIView):
                 email=archive.email,
                 user_type=archive.user_type,
                 gender=archive.gender,
+                academic_year=archive.academic_year,
                 parent_phone=archive.parent_phone,
                 government=archive.government,
                 max_allowed_devices=archive.max_allowed_devices,
@@ -1556,6 +1564,7 @@ class RestoreUserView(APIView):
                 'user_id': restored_user.id,
                 'username': restored_user.username,
                 'name': restored_user.name,
+                'academic_year': restored_user.academic_year,
                 'password': password_to_set,
                 'password_note': 'كلمة المرور المؤقتة' if not custom_password else 'كلمة المرور المخصصة',
                 'original_archive_id': archive_id

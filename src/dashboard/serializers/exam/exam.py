@@ -171,6 +171,7 @@ class ExamSerializer(serializers.ModelSerializer):
     status = serializers.SerializerMethodField()
     student_name = serializers.CharField(source='student.name', read_only=True)
     student_phone = serializers.CharField(source='student.user.username', read_only=True)
+    student_academic_year = serializers.CharField(source='student.user.academic_year', read_only=True)
     course_name = serializers.CharField(source='course.name', read_only=True)
     category_names = serializers.SerializerMethodField()
     score = serializers.IntegerField(read_only=True)
@@ -185,6 +186,7 @@ class ExamSerializer(serializers.ModelSerializer):
             "student",
             "student_name",
             "student_phone",
+            "student_academic_year",
             "title",
             "course",
             "course_name",
@@ -248,6 +250,7 @@ class StudentExamLimitSerializer(serializers.ModelSerializer):
     user_id = serializers.IntegerField(source='user.id', read_only=True)
     student_name = serializers.CharField(source='name', read_only=True)
     student_phone = serializers.CharField(source='user.username', read_only=True)
+    student_academic_year = serializers.CharField(source='user.academic_year', read_only=True)
     limits = serializers.SerializerMethodField()
 
     class Meta:
@@ -257,6 +260,7 @@ class StudentExamLimitSerializer(serializers.ModelSerializer):
             'user_id',
             'student_name',
             'student_phone',
+            'student_academic_year',
             'limits',
         ]
 
@@ -421,11 +425,14 @@ class YearSerializer(serializers.ModelSerializer):
 
 
 class ResultTrialSerializer(serializers.ModelSerializer):
+    student_academic_year = serializers.CharField(source="result.student.user.academic_year", read_only=True)
+
     class Meta:
         model = ResultTrial
         fields = [
             "id",
             "result",
+            "student_academic_year",
             "trial",
             "score",
             "exam_score",
@@ -452,6 +459,7 @@ class ResultSerializer(serializers.ModelSerializer):
     student_name = serializers.SerializerMethodField()
     student_phone = serializers.SerializerMethodField()
     student_gender = serializers.SerializerMethodField()
+    student_academic_year = serializers.CharField(source="student.user.academic_year", read_only=True)
     parent_phone = serializers.SerializerMethodField()
     student_started_exam_at = serializers.SerializerMethodField()
     student_submitted_exam_at = serializers.SerializerMethodField()
@@ -481,6 +489,7 @@ class ResultSerializer(serializers.ModelSerializer):
             "student_name",
             "student_phone",
             "student_gender",
+            "student_academic_year",
             "parent_phone",
             "student_started_exam_at",
             "student_submitted_exam_at",
@@ -591,6 +600,7 @@ class TopStudentResultSerializer(serializers.ModelSerializer):
     student_name = serializers.CharField(source="name", read_only=True)
     student_phone = serializers.CharField(source="user.username", read_only=True)
     student_gender = serializers.CharField(source="user.gender", read_only=True)
+    student_academic_year = serializers.CharField(source="user.academic_year", read_only=True)
     student_score = serializers.FloatField(source="total_student_score", read_only=True)
     exam_score = serializers.FloatField(source="total_exam_score", read_only=True)
     results_count = serializers.IntegerField(read_only=True)
@@ -603,6 +613,7 @@ class TopStudentResultSerializer(serializers.ModelSerializer):
             "student_name",
             "student_phone",
             "student_gender",
+            "student_academic_year",
             "parent_phone",
             "student_score",
             "exam_score",
@@ -690,7 +701,9 @@ class FlattenedExamResultSerializer(serializers.ModelSerializer):
         student_id = self.context.get("student_id")
         if not student_id:
             return None
-        return Result.objects.filter(exam=obj, student_id=student_id).prefetch_related("trials").first()
+        return Result.objects.filter(exam=obj, student_id=student_id).select_related(
+            "student__user"
+        ).prefetch_related("trials").first()
 
     def get_result_id(self, obj):
         result = self._result(obj)
@@ -724,10 +737,11 @@ class FlattenedExamResultSerializer(serializers.ModelSerializer):
 class CombinedStudentResultSerializer(serializers.ModelSerializer):
     result = BriefedResultSerializer(source="result_set", many=True, read_only=True)
     gender = serializers.CharField(source="user.gender", read_only=True)
+    academic_year = serializers.CharField(source="user.academic_year", read_only=True)
 
     class Meta:
         model = Student
-        fields = ["id", "name", "gender", "parent_phone", "code", "result"]
+        fields = ["id", "name", "gender", "academic_year", "parent_phone", "code", "result"]
 
 
 class ExamQuestionSerializer(serializers.ModelSerializer):
