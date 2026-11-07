@@ -155,7 +155,7 @@ class PlanSubscription(models.Model):
     coupon_applied_at = models.DateTimeField(null=True, blank=True)
     payment_status = models.CharField(max_length=20, choices=PAYMENT_STATUS_CHOICES, default=PAYMENT_PENDING)
     easypay_invoice_uid = models.CharField(max_length=120, blank=True, null=True)
-    easypay_invoice_sequence = models.CharField(max_length=120, blank=True, null=True)
+    easypay_invoice_sequence = models.CharField(max_length=120, blank=True, null=True, db_index=True)
     easypay_payment_url = models.URLField(blank=True, null=True)
     easypay_payload = models.JSONField(default=dict, blank=True)
     paid_at = models.DateTimeField(null=True, blank=True)
@@ -249,6 +249,43 @@ class PlanSubscription(models.Model):
             self.access_starts_on, self.access_ends_on = self.access_period
             update_fields.extend(["access_starts_on", "access_ends_on"])
         self.save(update_fields=update_fields)
+
+
+class EasyPayWebhookEvent(models.Model):
+    class Outcome(models.TextChoices):
+        PAID = 'paid', 'Payment applied'
+        ALREADY_PAID = 'already_paid', 'Already paid / retry'
+        RECEIVED = 'received', 'Received without activation'
+        REJECTED = 'rejected', 'Rejected'
+        UNMATCHED = 'unmatched', 'Invoice not found'
+        AMBIGUOUS = 'ambiguous', 'Ambiguous invoice'
+        CONFIG_ERROR = 'config_error', 'Configuration error'
+        ERROR = 'error', 'Processing error'
+
+    received_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    subscription = models.ForeignKey(
+        PlanSubscription, null=True, blank=True, on_delete=models.SET_NULL,
+        related_name='webhook_events',
+    )
+    sequence = models.CharField(max_length=120, blank=True, db_index=True)
+    invoice_uid = models.CharField(max_length=120, blank=True)
+    provider_status = models.CharField(max_length=40, blank=True)
+    amount = models.CharField(max_length=64, blank=True)
+    customer_phone = models.CharField(max_length=30, blank=True, db_index=True)
+    outcome = models.CharField(max_length=20, choices=Outcome.choices, db_index=True)
+    http_status = models.PositiveSmallIntegerField()
+    reason = models.CharField(max_length=255, blank=True)
+    signature_present = models.BooleanField(default=False)
+    signature_valid = models.BooleanField(null=True)
+    request_summary = models.JSONField(default=dict, blank=True)
+
+    class Meta:
+        ordering = ['-received_at', '-id']
+        verbose_name = 'EasyPay webhook delivery'
+        verbose_name_plural = 'EasyPay webhook deliveries'
+
+    def __str__(self):
+        return f'{self.sequence or "No sequence"} — {self.get_outcome_display()}'
 
 
 class PlanSubscriptionCourse(models.Model):

@@ -2,6 +2,7 @@ import requests
 import json
 import logging
 import hashlib
+import hmac
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
@@ -151,7 +152,7 @@ class EasyPayService:
             
             logger.debug("EasyPay webhook signature calculated for phone suffix=%s", str(customer_phone)[-4:])
             
-            return expected_signature == received_signature
+            return hmac.compare_digest(expected_signature, received_signature)
             
         except Exception as e:
             logger.error(f"Error verifying EasyPay webhook signature: {str(e)}")

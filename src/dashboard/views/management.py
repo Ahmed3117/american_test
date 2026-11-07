@@ -1,6 +1,7 @@
 from django.db import transaction
 from django.db.models.deletion import ProtectedError
 from django.shortcuts import get_object_or_404
+from django_filters import rest_framework as filters
 from rest_framework import generics, status
 from rest_framework.exceptions import ValidationError
 from rest_framework.permissions import IsAdminUser
@@ -60,8 +61,22 @@ class DiscountCouponDetailView(StaffOnlyMixin, generics.RetrieveUpdateDestroyAPI
     serializer_class = DiscountCouponSerializer
 
 
+class PlanSubscriptionFilter(filters.FilterSet):
+    payment_status = filters.ChoiceFilter(choices=[
+        (PlanSubscription.PAYMENT_PAID, "Paid"),
+        (PlanSubscription.PAYMENT_PENDING, "Pending"),
+        (PlanSubscription.PAYMENT_MANUAL, "Manual"),
+    ])
+
+    class Meta:
+        model = PlanSubscription
+        fields = ["payment_status"]
+
+
 class PlanSubscriptionListView(StaffOnlyMixin, generics.ListAPIView):
     serializer_class = PlanSubscriptionSerializer
+    filter_backends = [filters.DjangoFilterBackend]
+    filterset_class = PlanSubscriptionFilter
 
     def get_queryset(self):
         return PlanSubscription.objects.select_related("student", "plan").prefetch_related("courses")
