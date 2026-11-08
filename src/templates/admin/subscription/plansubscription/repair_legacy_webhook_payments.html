@@ -1,0 +1,49 @@
+{% extends "admin/base_site.html" %}
+{% block breadcrumbs %}
+<div class="breadcrumbs"><a href="{% url 'admin:index' %}">Home</a> &rsaquo;
+<a href="{{ changelist_url }}">Plan subscriptions</a> &rsaquo; Review legacy webhook payments</div>
+{% endblock %}
+{% block content %}
+<p><strong>Preview only — opening this page does not change payments.</strong></p>
+<p>This lists EasyPay-paid purchases with both invoice identifiers missing, the old bug's matching pattern.
+An eligible row requires a valid retained signature and a uniquely matched different invoice with the same amount/customer,
+no verified payment/admin status-change evidence, and paid-at close to the saved update time.</p>
+<p><strong>Manual review is not automatic correction.</strong> A last saved payload cannot disprove an earlier legitimate payment.
+Missing history, rotated signing keys, missing/duplicate invoices and older paid-at dates are left untouched.
+Verify the selected purchases against EasyPay before confirming.</p>
+<p>Reset changes only <code>payment_status</code> to <code>pending</code> and clears <code>paid_at</code>.
+Course links, exams, results and payloads are retained. Access from these purchases stops immediately;
+access from other valid purchases remains. No refunds, callbacks or payments on other purchases are performed.</p>
+<p>Showing {{ rows|length }} of {{ page.paginator.count }} possible records. Preview selections expire after 10 minutes.</p>
+<form method="post">
+  {% csrf_token %}
+  {{ form.non_field_errors }}
+  <div style="overflow-x:auto">
+  <table>
+    <thead><tr><th>Select</th><th>Paid purchase</th><th>Student / phone</th><th>Plan / amount / dates</th><th>Callback's invoice owner</th><th>Decision / evidence</th></tr></thead>
+    <tbody>
+    {% for row in rows %}
+      {% with assessment=row.assessment source=row.assessment.source owner=row.assessment.owner %}
+      <tr>
+        <td>{% if assessment.eligible %}<input type="checkbox" name="selection" value="{{ row.token }}" aria-label="Select subscription {{ source.pk }}">{% else %}Not eligible{% endif %}</td>
+        <td><a href="{% url 'admin:subscription_plansubscription_change' source.pk %}" target="_blank" rel="noopener">#{{ source.pk }}</a></td>
+        <td>{{ source.student.name }}<br>{{ source.student.user.username }}<br>User #{{ source.student.user_id }}</td>
+        <td>{{ source.plan.title }} / {{ source.invoice_amount }}<br>Paid: {{ source.paid_at|default:"Missing" }}<br>Updated: {{ source.updated_at }}</td>
+        <td>{% if owner %}<a href="{% url 'admin:subscription_plansubscription_change' owner.pk %}" target="_blank" rel="noopener">#{{ owner.pk }}</a><br>
+          {{ owner.student.name }} / {{ owner.student.user.username }}<br>{{ assessment.sequence }}{% else %}Not established{% endif %}</td>
+        <td><strong>{% if assessment.eligible %}Eligible for confirmed reset{% else %}Manual review only{% endif %}</strong><br>{{ assessment.reason }}</td>
+      </tr>
+      {% endwith %}
+    {% empty %}<tr><td colspan="6">No paid purchases with both invoice identifiers missing.</td></tr>{% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p>{{ form.reason.errors }}{{ form.reason.label_tag }}<br>{{ form.reason }}</p>
+  <p>{{ form.confirm.errors }}{{ form.confirm }} {{ form.confirm.label }}</p>
+  <input type="submit" value="Reset only selected, reviewed records to pending">
+  <a href="{{ changelist_url }}">Cancel</a>
+</form>
+<p>{% if page.has_previous %}<a href="?page={{ page.previous_page_number }}">Previous</a>{% endif %}
+Page {{ page.number }} of {{ page.paginator.num_pages }}
+{% if page.has_next %}<a href="?page={{ page.next_page_number }}">Next</a>{% endif %}</p>
+{% endblock %}

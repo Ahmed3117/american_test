@@ -1,12 +1,26 @@
 import json
 
-from django.contrib import admin
+from django import forms
+from django.contrib import admin, messages
+from django.core.exceptions import PermissionDenied
+from django.core.paginator import Paginator
 from django.db.models import Count, Exists, OuterRef, Q, Subquery
-from django.urls import reverse
+from django.shortcuts import redirect
+from django.template.response import TemplateResponse
+from django.urls import path, reverse
 from django.utils import timezone
 from django.utils.html import format_html, format_html_join
 
 from .models import DiscountCoupon, EasyPayWebhookEvent, Plan, PlanSubscription, PlanSubscriptionCourse
+from .payment_repair import (
+    BATCH_SIZE, RepairRejected, assess_legacy_payment, make_repair_preview,
+    possible_legacy_misattributions, repair_selected_payments,
+)
+
+
+class LegacyPaymentRepairForm(forms.Form):
+    confirm = forms.BooleanField(label='I checked these selected records against EasyPay and confirm resetting them to pending.')
+    reason = forms.CharField(max_length=500, label='Reconciliation reason', widget=forms.Textarea(attrs={'rows': 3, 'cols': 70}))
 
 
 def admin_link(model, pk, label):
@@ -90,6 +104,7 @@ class SubscriptionDiagnosticFilter(admin.SimpleListFilter):
 
 @admin.register(PlanSubscription)
 class PlanSubscriptionAdmin(admin.ModelAdmin):
+    change_list_template = 'admin/subscription/plansubscription/change_list.html'
     list_display = ('id', 'student_identity', 'plan', 'payment_status', 'access_now', 'invoice_total',
                     'easypay_invoice_sequence', 'course_count', 'delivery_count', 'last_delivery_at', 'diagnostics', 'paid_at', 'created_at')
     list_filter = ('payment_status', SubscriptionAccessFilter, SubscriptionDiagnosticFilter,
@@ -118,6 +133,49 @@ class PlanSubscriptionAdmin(admin.ModelAdmin):
     readonly_fields = ('id', 'student_identity', 'access_now', 'diagnostics', 'delivery_history', 'selected_courses',
                        'invoice_total', 'effective_window', 'payload_summary', 'created_at', 'updated_at', 'paid_at')
 
+    def has_legacy_payment_repair_permission(self, request):
+        return request.user.is_active and request.user.is_staff and request.user.is_superuser
+
+    def changelist_view(self, request, extra_context=None):
+        return super().changelist_view(request, extra_context={
+            **(extra_context or {}), 'show_legacy_payment_repair': self.has_legacy_payment_repair_permission(request),
+        })
+
+    def get_urls(self):
+        return [path('repair-legacy-webhook-payments/', self.admin_site.admin_view(self.repair_legacy_webhook_payments_view),
+                     name='subscription_plansubscription_repair_legacy_webhook_payments')] + super().get_urls()
+
+    def repair_legacy_webhook_payments_view(self, request):
+        if not self.has_legacy_payment_repair_permission(request):
+            raise PermissionDenied
+        form = LegacyPaymentRepairForm(request.POST if request.method == 'POST' else None)
+        response_status = 200
+        if request.method == 'POST':
+            if form.is_valid():
+                try:
+                    changed = repair_selected_payments(request.POST.getlist('selection'), actor=request.user,
+                                                       reason=form.cleaned_data['reason'])
+                except RepairRejected as error:
+                    form.add_error(None, str(error))
+                    response_status = 400
+                else:
+                    self.message_user(request, f'Reset {changed} reviewed subscription(s) to pending. '
+                                      'Only their access was revoked; course links and other purchases were preserved.', messages.SUCCESS)
+                    return redirect('admin:subscription_plansubscription_changelist')
+            else:
+                response_status = 400
+        page = Paginator(possible_legacy_misattributions(), BATCH_SIZE).get_page(request.GET.get('page'))
+        rows = []
+        for source in page.object_list:
+            assessment = assess_legacy_payment(source)
+            rows.append({'assessment': assessment, 'token': make_repair_preview(assessment, request.user) if assessment.eligible else ''})
+        request.current_app = self.admin_site.name
+        return TemplateResponse(request, 'admin/subscription/plansubscription/repair_legacy_webhook_payments.html', {
+            **self.admin_site.each_context(request), 'title': 'Review legacy webhook payment mistakes',
+            'opts': self.model._meta, 'form': form, 'rows': rows, 'page': page,
+            'changelist_url': reverse('admin:subscription_plansubscription_changelist'),
+        }, status=response_status)
+
     def get_queryset(self, request):
         duplicate = PlanSubscription.objects.filter(easypay_invoice_sequence=OuterRef('easypay_invoice_sequence')).exclude(
             pk=OuterRef('pk')).exclude(easypay_invoice_sequence='')
@@ -140,6 +198,13 @@ class PlanSubscriptionAdmin(admin.ModelAdmin):
         if obj and obj.is_paid:
             return tuple(dict.fromkeys((*self.readonly_fields, *(field.name for field in obj._meta.fields))))
         return self.readonly_fields
+
+    def save_model(self, request, obj, form, change):
+        # Paid forms are fully read-only. A stale, unchanged browser form must
+        # not write its old paid state back over a concurrently repaired row.
+        if change and not form.changed_data:
+            return
+        super().save_model(request, obj, form, change)
 
     @admin.display(description='Student / phone / IDs')
     def student_identity(self, obj):

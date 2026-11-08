@@ -193,6 +193,19 @@ class PlanSubscriptionSerializer(serializers.ModelSerializer):
         ]
 
 
+class DashboardPlanSubscriptionSerializer(PlanSubscriptionSerializer):
+    """Add account identity to dashboard reads without changing student APIs."""
+
+    student_user_id = serializers.IntegerField(source="student.user_id", read_only=True)
+    student_username = serializers.CharField(source="student.user.username", read_only=True)
+    student_name = serializers.CharField(source="student.user.name", read_only=True)
+
+    class Meta(PlanSubscriptionSerializer.Meta):
+        fields = PlanSubscriptionSerializer.Meta.fields + [
+            "student_user_id", "student_username", "student_name",
+        ]
+
+
 class ApplyDiscountCouponSerializer(serializers.Serializer):
     coupon = serializers.RegexField(
         regex=r"^[1-9]{10}$",

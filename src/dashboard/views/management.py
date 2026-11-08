@@ -14,6 +14,7 @@ from student.models import Student
 from subscription.models import DiscountCoupon, Plan, PlanSubscription, PlanSubscriptionCourse
 from subscription.serializers import (
     DashboardSubscriptionCreateSerializer,
+    DashboardPlanSubscriptionSerializer,
     DiscountCouponSerializer,
     PlanSerializer,
     PlanSubscriptionSerializer,
@@ -62,6 +63,8 @@ class DiscountCouponDetailView(StaffOnlyMixin, generics.RetrieveUpdateDestroyAPI
 
 
 class PlanSubscriptionFilter(filters.FilterSet):
+    username = filters.CharFilter(field_name="student__user__username", lookup_expr="icontains")
+    name = filters.CharFilter(field_name="student__user__name", lookup_expr="icontains")
     payment_status = filters.ChoiceFilter(choices=[
         (PlanSubscription.PAYMENT_PAID, "Paid"),
         (PlanSubscription.PAYMENT_PENDING, "Pending"),
@@ -70,16 +73,18 @@ class PlanSubscriptionFilter(filters.FilterSet):
 
     class Meta:
         model = PlanSubscription
-        fields = ["payment_status"]
+        fields = ["payment_status", "username", "name"]
 
 
 class PlanSubscriptionListView(StaffOnlyMixin, generics.ListAPIView):
-    serializer_class = PlanSubscriptionSerializer
+    serializer_class = DashboardPlanSubscriptionSerializer
     filter_backends = [filters.DjangoFilterBackend]
     filterset_class = PlanSubscriptionFilter
 
     def get_queryset(self):
-        return PlanSubscription.objects.select_related("student", "plan").prefetch_related("courses")
+        return PlanSubscription.objects.select_related(
+            "student__user", "plan", "discount_coupon"
+        ).prefetch_related("courses").order_by("-created_at", "-id")
 
     def post(self, request):
         serializer = DashboardSubscriptionCreateSerializer(data=request.data)
@@ -118,7 +123,29 @@ class PlanSubscriptionListView(StaffOnlyMixin, generics.ListAPIView):
         )
 
 
+class StudentPlanSubscriptionListView(PlanSubscriptionListView):
+    """Subscription/payment history scoped by the student's accounts.User.id."""
+
+    http_method_names = ["get", "head", "options"]
+
+    def get_queryset(self):
+        student = get_object_or_404(
+            Student, user_id=self.kwargs["student_id"], user__user_type="student",
+            user__is_staff=False, user__is_superuser=False,
+        )
+        return super().get_queryset().filter(student_id=student.pk)
+
+
 class PlanSubscriptionDeleteView(StaffOnlyMixin, APIView):
+    """Preserve the existing delete route; also expose dashboard detail GET."""
+
+    def get(self, request, subscription_id):
+        subscription = get_object_or_404(
+            PlanSubscription.objects.select_related("student__user", "plan", "discount_coupon").prefetch_related("courses"),
+            pk=subscription_id,
+        )
+        return Response(DashboardPlanSubscriptionSerializer(subscription, context={"request": request}).data)
+
     def delete(self, request, subscription_id):
         subscription = get_object_or_404(PlanSubscription, pk=subscription_id)
         subscription.delete()

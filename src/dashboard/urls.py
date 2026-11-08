@@ -11,6 +11,7 @@ urlpatterns = [
     path("discount-coupons/", management_views.DiscountCouponListCreateView.as_view(), name="discount-coupon-list-create"),
     path("discount-coupons/<int:pk>/", management_views.DiscountCouponDetailView.as_view(), name="discount-coupon-detail"),
     path("plans/subscriptions/", management_views.PlanSubscriptionListView.as_view(), name="plan-subscription-list"),
+    path("students/<int:student_id>/subscriptions/", management_views.StudentPlanSubscriptionListView.as_view(), name="student-plan-subscriptions"),
     path("plans/subscriptions/<int:subscription_id>/confirm/", management_views.ConfirmPlanSubscriptionView.as_view(), name="confirm-plan-subscription"),
     path("plans/subscriptions/<int:subscription_id>/courses/", management_views.SubscriptionCoursesView.as_view(), name="subscription-courses"),
     path("plans/subscriptions/<int:subscription_id>/", management_views.PlanSubscriptionDeleteView.as_view(), name="plan-subscription-delete"),
