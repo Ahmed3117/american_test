@@ -174,42 +174,91 @@ def main_exam_quota_status(student, course, number_of_questions=None, at=None):
     )
 
 
-def select_exam_question_ids(*, course, categories, years, difficulty_counts):
-    """Select unique active MCQs matching the student's requested breakdown."""
+def _mcq_pool(course, categories=None, years=None):
+    """Active MCQs of one course, optionally narrowed by categories/years."""
     queryset = Question.objects.filter(
         course=course,
         is_active=True,
         question_type=QuestionType.MCQ,
-        difficulty__in=[
-            difficulty for difficulty, count in difficulty_counts.items() if count
-        ],
     )
     if categories:
         queryset = queryset.filter(category__in=categories)
     if years:
+        # The M2M join repeats a question once per matching year, so callers
+        # must use distinct(); order_by() keeps DISTINCT on the selected columns.
         queryset = queryset.filter(years__in=years)
+    return queryset.order_by()
 
-    available = {difficulty: [] for difficulty, count in difficulty_counts.items() if count}
-    for question_id, difficulty in queryset.values_list('id', 'difficulty').distinct():
-        if difficulty in available:
-            available[difficulty].append(question_id)
 
-    missing = {
-        difficulty: {'requested': count, 'available': len(available.get(difficulty, []))}
+def select_exam_question_ids(*, course, categories, years, difficulty_counts):
+    """Pick unique random active MCQs, relaxing filters only when needed.
+
+    Pools are tried in this order and the first with enough questions wins:
+
+    1. categories + years with the exact easy/medium/hard split
+    2. categories + years, any difficulty
+    3. categories only
+    4. years only
+    5. the whole course (the course itself is never relaxed)
+
+    Relaxing is silent: the exam keeps the filters and counts the student
+    requested. At most four small queries run. Levels 1 and 2 share one query,
+    a level whose filters match an earlier one is skipped, and every pool that
+    fails is smaller than the requested total, so loading its IDs is cheap.
+
+    Returns ``(question_ids, {})``, or ``([], missing)`` when even the whole
+    course does not have enough questions.
+    """
+    total = sum(difficulty_counts.values())
+    categories = list(categories or [])
+    years = list(years or [])
+
+    difficulty_by_id = dict(
+        _mcq_pool(course, categories, years)
+        .values_list('id', 'difficulty')
+        .distinct()
+    )
+    ids_by_difficulty = {}
+    for question_id, difficulty in difficulty_by_id.items():
+        ids_by_difficulty.setdefault(difficulty, []).append(question_id)
+
+    if all(
+        len(ids_by_difficulty.get(difficulty, [])) >= count
         for difficulty, count in difficulty_counts.items()
-        if len(available.get(difficulty, [])) < count
-    }
-    if missing:
-        return [], missing
-
-    selected = []
-    for difficulty in (
-        DifficultyLevel.EASY,
-        DifficultyLevel.MEDIUM,
-        DifficultyLevel.HARD,
     ):
-        count = difficulty_counts.get(difficulty, 0)
-        if count:
-            selected.extend(random.sample(available[difficulty], count))
-    random.shuffle(selected)
-    return selected, {}
+        selected = []
+        for difficulty in (
+            DifficultyLevel.EASY,
+            DifficultyLevel.MEDIUM,
+            DifficultyLevel.HARD,
+        ):
+            count = difficulty_counts.get(difficulty, 0)
+            if count:
+                selected.extend(random.sample(ids_by_difficulty[difficulty], count))
+        random.shuffle(selected)
+        return selected, {}
+
+    available = len(difficulty_by_id)
+    if available >= total:
+        return random.sample(list(difficulty_by_id), total), {}
+
+    tried = {(bool(categories), bool(years))}
+    for level_categories, level_years in (
+        (categories, []),
+        ([], years),
+        ([], []),
+    ):
+        level = (bool(level_categories), bool(level_years))
+        if level in tried:
+            continue
+        tried.add(level)
+        question_ids = list(
+            _mcq_pool(course, level_categories, level_years)
+            .values_list('id', flat=True)
+            .distinct()
+        )
+        available = len(question_ids)
+        if available >= total:
+            return random.sample(question_ids, total), {}
+
+    return [], {'requested': total, 'available': available}

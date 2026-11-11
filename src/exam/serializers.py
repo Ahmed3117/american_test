@@ -162,7 +162,10 @@ class ExamSerializer(serializers.ModelSerializer):
         )
         if missing:
             raise serializers.ValidationError(
-                {'questions': 'Not enough matching active MCQ questions.', 'availability': missing}
+                {
+                    'questions': 'This course does not have enough active MCQ questions.',
+                    'availability': missing,
+                }
             )
         attrs['_selected_question_ids'] = selected_ids
         attrs['_student'] = student
