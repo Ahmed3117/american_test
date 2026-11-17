@@ -343,6 +343,10 @@ class Answer(models.Model):
     question = models.ForeignKey(Question, related_name='answers', on_delete=models.CASCADE)
     created = models.DateTimeField(auto_now_add=True)
 
+    class Meta:
+        # Answer choices are shown in creation order on every exam/result page.
+        ordering = ['id']
+
     def __str__(self):
         return f"Q: {self.question.text} | A: {self.text} | Correct: {self.is_correct}"
 
@@ -354,7 +358,9 @@ class ExamQuestion(models.Model):
     updated = models.DateTimeField(auto_now=True, null=True, blank=True)
     order = models.PositiveIntegerField(default=1)
     class Meta:
-        ordering = ['order', 'created']
+        # Canonical question order of an exam; StartExam, SubmitExam and every
+        # result/trial detail page follow it.
+        ordering = ['order', 'id']
     def __str__(self):
         return f"Exam: {self.exam.title} | Question: {self.question.text} | Active: {self.is_active}"
 

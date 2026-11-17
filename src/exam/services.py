@@ -1,7 +1,7 @@
 import random
 from datetime import timedelta
 
-from django.db.models import Count, Q
+from django.db.models import Count, F, OuterRef, Q, Subquery
 from django.utils import timezone
 
 from subscription.access import student_has_course_access
@@ -9,6 +9,7 @@ from subscription.access import student_has_course_access
 from .models import (
     DifficultyLevel,
     ExamConfig,
+    ExamQuestion,
     ExamMode,
     Question,
     QuestionType,
@@ -20,6 +21,26 @@ from .models import (
 
 
 TRIAL_PERIODS = ('daily', 'weekly', 'monthly')
+
+
+def order_submissions_like_exam(queryset):
+    """Order submissions exactly as their questions appeared in the exam.
+
+    Uses the exam's ExamQuestion order (order, id), the same order StartExam
+    serves. Questions no longer linked to the exam go last, by submission id.
+    """
+    relation = ExamQuestion.objects.filter(
+        exam_id=OuterRef('exam_id'),
+        question_id=OuterRef('question_id'),
+    ).order_by('order', 'id')
+    return queryset.annotate(
+        exam_question_order=Subquery(relation.values('order')[:1]),
+        exam_question_relation_id=Subquery(relation.values('id')[:1]),
+    ).order_by(
+        F('exam_question_order').asc(nulls_last=True),
+        F('exam_question_relation_id').asc(nulls_last=True),
+        'id',
+    )
 
 
 def student_access_type(student, course):

@@ -48,7 +48,7 @@ from exam.models import (
     Year,
 )
 from exam.serializer_fields import stored_file_url
-from exam.services import exam_quota_status
+from exam.services import exam_quota_status, order_submissions_like_exam
 from student.models import Student
 
 from dashboard.serializers.exam.exam import (
@@ -412,7 +412,7 @@ def _serialize_trial_answer(submission):
 def _result_detail_payload(result, trial):
     if trial:
         mcq_submissions = (
-            Submission.objects.filter(result_trial=trial)
+            order_submissions_like_exam(Submission.objects.filter(result_trial=trial))
             .select_related("question", "selected_answer", "question__category")
             .prefetch_related("question__answers")
         )

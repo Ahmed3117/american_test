@@ -50,6 +50,7 @@ from course.models import Course
 from student.models import Student, StudentFavorite
 from .serializer_fields import stored_file_url
 from .services import (
+    order_submissions_like_exam,
     main_exam_quota_status,
     temp_exam_quota_status,
     trial_quota_status,
@@ -350,14 +351,17 @@ class SubmitExam(APIView):
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
-        exam_questions = {
-            question.id: question
-            for question in Question.objects.filter(
-                question_type=QuestionType.MCQ,
-                exam_questions__exam=exam,
-                exam_questions__is_active=True,
-            ).distinct()
-        }
+        # Keep the exam's question order so submissions are stored in the
+        # same sequence the student saw them.
+        exam_questions = {}
+        for relation in (
+            ExamQuestion.objects.filter(
+                exam=exam,
+                is_active=True,
+                question__question_type=QuestionType.MCQ,
+            ).select_related('question').order_by('order', 'id')
+        ):
+            exam_questions.setdefault(relation.question_id, relation.question)
         if not exam_questions:
             return Response(
                 {"error": "This exam has no active MCQ questions."},
@@ -583,9 +587,9 @@ class GetMyExamResult(APIView):
             )
 
         # Fetch MCQ submissions and prefetch correct answers for each question
-        mcq_submissions = Submission.objects.filter(
+        mcq_submissions = order_submissions_like_exam(Submission.objects.filter(
             student=student, exam=exam, result_trial=active_trial
-        ).select_related(
+        )).select_related(
             'question', 'selected_answer', 'question__category'
         ).prefetch_related(
             Prefetch(
@@ -697,9 +701,9 @@ class GetMyExamResultForTrial(APIView):
         )
 
         # Fetch MCQ submissions and prefetch correct answers for each question
-        mcq_submissions = Submission.objects.filter(
+        mcq_submissions = order_submissions_like_exam(Submission.objects.filter(
             result_trial=trial
-        ).select_related(
+        )).select_related(
             'question', 'selected_answer', 'question__category'
         ).prefetch_related(
             Prefetch(
@@ -707,8 +711,7 @@ class GetMyExamResultForTrial(APIView):
                 queryset=Answer.objects.filter(is_correct=True),
                 to_attr='correct_answers_list'
             )
-
-        ).order_by("id")
+        )
 
 
         # Calculate counts
