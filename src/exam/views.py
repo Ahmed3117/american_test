@@ -11,6 +11,7 @@ from django.http import Http404
 from django.utils import timezone
 from django.db.models import Count, Min, Max
 from django.db import transaction
+from django.contrib.contenttypes.models import ContentType
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import OrderingFilter, SearchFilter
 from django.db.models import Prefetch
@@ -46,7 +47,7 @@ from .models import (
     Year,
 )
 from course.models import Course
-from student.models import Student
+from student.models import Student, StudentFavorite
 from .serializer_fields import stored_file_url
 from .services import (
     main_exam_quota_status,
@@ -78,7 +79,7 @@ class StudentYearOptionListView(generics.ListAPIView):
     serializer_class = StudentYearOptionSerializer
     permission_classes = [IsAuthenticated, HasStudentProfile]
     pagination_class = None
-    queryset = Year.objects.only('id', 'value').order_by('-value', 'id')
+    queryset = Year.objects.only('id', 'value')
 
 
 def _question_explanation_fields(question, prefix="question_explanation"):
@@ -132,7 +133,7 @@ class StudentExamListCreateView(generics.ListCreateAPIView):
         )
 
 
-class StudentExamDetailView(generics.RetrieveAPIView):
+class StudentExamDetailView(generics.RetrieveDestroyAPIView):
     serializer_class = ExamSerializer
     permission_classes = [IsAuthenticated, HasStudentProfile]
 
@@ -140,6 +141,24 @@ class StudentExamDetailView(generics.RetrieveAPIView):
         return Exam.objects.filter(student=self.request.user.student).select_related(
             'student', 'course'
         ).prefetch_related('categories', 'years', 'exam_questions')
+
+    @transaction.atomic
+    def destroy(self, request, *args, **kwargs):
+        student = Student.objects.select_for_update().get(pk=request.user.student.pk)
+        exam = self.get_object()
+        mistakes = Submission.objects.filter(student=student, is_correct=False)
+        removed_questions = mistakes.filter(exam=exam).values('question_id')
+        remaining_questions = mistakes.exclude(exam=exam).values('question_id')
+        # Keep shared review entries and entries already used in a practice exam.
+        StudentBank.objects.filter(
+            student=student, question_id__in=removed_questions,
+            included_in_temp_exams__isnull=True,
+        ).exclude(question_id__in=remaining_questions).delete()
+        StudentFavorite.objects.filter(
+            content_type=ContentType.objects.get_for_model(Exam), object_id=exam.pk,
+        ).delete()
+        exam.delete()
+        return Response(status=status.HTTP_204_NO_CONTENT)
 
 
 class ExamConfigStatusView(APIView):
@@ -222,9 +241,8 @@ class StartExam(APIView):
 
     @transaction.atomic
     def get(self, request, exam_id: int) -> Response:
-        student = request.user.student
+        student = Student.objects.select_for_update().get(pk=request.user.student.pk)
         exam = get_object_or_404(Exam, pk=exam_id, student=student)
-        student = Student.objects.select_for_update().get(pk=student.pk)
 
         questions = self._get_exam_questions(exam)
         if len(questions) != exam.number_of_questions:
@@ -288,7 +306,7 @@ class SubmitExam(APIView):
 
     @transaction.atomic
     def post(self, request, exam_id):
-        student = request.user.student
+        student = Student.objects.select_for_update().get(pk=request.user.student.pk)
         exam = get_object_or_404(Exam, pk=exam_id, student=student)
         submit_type = request.data.get("submit_type", "student_submit")
         

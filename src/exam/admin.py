@@ -715,9 +715,9 @@ class StudentExamQuotaOverrideAdmin(admin.ModelAdmin):
 
 @admin.register(Year)
 class YearAdmin(admin.ModelAdmin):
-    list_display = ("id", "value")
+    list_display = ("id", "value", "order")
+    list_editable = ("order",)
     search_fields = ("value",)
-    ordering = ("-value",)
 # admin.site.register(Submission)
 # admin.site.register(Result)
 # admin.site.register(ResultTrial)

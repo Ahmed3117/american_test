@@ -659,12 +659,12 @@ class YearListCreateView(generics.ListCreateAPIView):
     permission_classes = STAFF_PERMISSIONS
     filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
     search_fields = ["value"]
-    ordering_fields = ["value", "id"]
-    ordering = ["-value"]
+    ordering_fields = ["order", "value", "id"]
+    ordering = ["order", "id"]
 
 
 class YearListAllView(generics.ListAPIView):
-    queryset = Year.objects.all().order_by("-value")
+    queryset = Year.objects.all()
     serializer_class = YearSerializer
     permission_classes = [AllowAny]
     pagination_class = None

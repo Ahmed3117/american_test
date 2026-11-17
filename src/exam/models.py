@@ -240,9 +240,10 @@ class Year(models.Model):
     the junction rows simply disappear).
     """
     value = models.CharField(max_length=10, unique=True)
+    order = models.PositiveIntegerField(default=0)
 
     class Meta:
-        ordering = ["-value"]
+        ordering = ["order", "id"]
         verbose_name = "Year"
         verbose_name_plural = "Years"
 
